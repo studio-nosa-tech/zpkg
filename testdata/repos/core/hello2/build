@@ -1,0 +1,10 @@
+#!/bin/sh
+# Installs hello2; depends on the hello package.
+set -e
+
+mkdir -p "$ZPKG_DESTROOT/bin"
+cat > "$ZPKG_DESTROOT/bin/hello2" <<'EOF'
+#!/bin/sh
+echo "Hello #2 from ZIGNOS!"
+EOF
+chmod 755 "$ZPKG_DESTROOT/bin/hello2"

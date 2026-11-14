@@ -1,0 +1,4 @@
+/zpkg
+/bin/
+/dist/
+*.test

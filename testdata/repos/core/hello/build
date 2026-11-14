@@ -1,0 +1,10 @@
+#!/bin/sh
+# Installs a trivial hello script into the destroot.
+set -e
+
+mkdir -p "$ZPKG_DESTROOT/bin"
+cat > "$ZPKG_DESTROOT/bin/hello" <<'EOF'
+#!/bin/sh
+echo "Hello from ZIGNOS!"
+EOF
+chmod 755 "$ZPKG_DESTROOT/bin/hello"
