@@ -33,6 +33,9 @@ Environment:
   ZPKG_CACHE   cache dir (default $ZPKG_ROOT/var/cache/zpkg)
   ZPKG_DB      package db dir (default $ZPKG_ROOT/var/lib/zpkg)
   ZPKG_FORCE   set to 1 to allow removing modified packages
+
+Build scripts run under bash and receive ZPKG_NAME, ZPKG_VERSION,
+ZPKG_ROOT, ZPKG_CACHE, ZPKG_DESTROOT, ZPKG_SRC and ZPKG_WORKDIR.
 `
 
 // Run dispatches a command line invocation.

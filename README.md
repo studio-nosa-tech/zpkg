@@ -64,7 +64,7 @@ $ZPKG_ROOT/bin/hello2
 └── build       # shell スクリプト。必須
 ```
 
-空行と `#` コメントは無視。`build` は `bash` で実行され、`$ZPKG_DESTROOT` に成果物を置く契約(`make DESTDIR="$ZPKG_DESTROOT" install` 等)。
+空行と `#` コメントは無視。`build` は `bash` で実行され、`$ZPKG_DESTROOT` に成果物を置く契約(`make DESTDIR="$ZPKG_DESTROOT" install` 等)。build スクリプトには `ZPKG_NAME` / `ZPKG_VERSION` / `ZPKG_ROOT` / `ZPKG_CACHE` / `ZPKG_DESTROOT` / `ZPKG_SRC` / `ZPKG_WORKDIR` が渡される。
 
 ## 既知の制限(v0)
 

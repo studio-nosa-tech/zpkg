@@ -62,6 +62,7 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 		"ZPKG_NAME="+r.Name,
 		"ZPKG_VERSION="+r.Version,
 		"ZPKG_ROOT="+cfg.Root,
+		"ZPKG_CACHE="+cfg.Cache,
 		"ZPKG_DESTROOT="+destroot,
 		"ZPKG_SRC="+src,
 		"ZPKG_WORKDIR="+work,
