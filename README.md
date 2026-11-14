@@ -23,7 +23,14 @@ go build -o zpkg ./cmd/zpkg
 $ZPKG_ROOT/bin/hello2
 ./zpkg list
 ./zpkg remove hello2 && ./zpkg remove hello
+
+./zpkg install dl-test       # 実ダウンロード + sha256 検証 + 展開の経路テスト(busybox 1.36.1 tarball)
+./zpkg remove dl-test
+./zpkg install hello && ./zpkg install hello-conflict   # → "bin/hello: already owned by hello" で失敗することを確認
+./zpkg remove hello
 ```
+
+注意: Windows の開発ホストでは `ZPKG_REPOS` の区切りは `;` を使う(例: `D:/path/to/testdata/repos/core`)。Unix は `:`。
 
 ## コマンド
 

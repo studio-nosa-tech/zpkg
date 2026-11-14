@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 
 	"github.com/studio-nosa-tech/zpkg/internal/hash"
 )
@@ -84,7 +85,20 @@ func Extract(archive, dest string) error {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
-	cmd := exec.Command("tar", "-xf", archive, "-C", dest)
+	args := []string{}
+	if runtime.GOOS == "windows" {
+		// GNU tar reads "D:/..." as a remote archive ("Cannot connect to D:");
+		// --force-local keeps it local on a Windows dev host. It must precede
+		// -f, which consumes the next argument as the archive name. Paths are
+		// converted to forward slashes because a native process spawning the
+		// MSYS tar mangles backslash paths. Linux, the real target, never
+		// needs any of this.
+		args = append(args, "--force-local")
+		archive = filepath.ToSlash(archive)
+		dest = filepath.ToSlash(dest)
+	}
+	args = append(args, "-xf", archive, "-C", dest)
+	cmd := exec.Command("tar", args...)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }

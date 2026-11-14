@@ -1,0 +1,12 @@
+#!/bin/sh
+# Exercises the fetch/checksum/extract path: installs a file taken from the
+# extracted busybox source without compiling anything.
+set -e
+
+test -f "$ZPKG_SRC/busybox-1.36.1/Makefile" || {
+	echo "expected extracted busybox source at \$ZPKG_SRC" >&2
+	exit 1
+}
+
+mkdir -p "$ZPKG_DESTROOT/share"
+cp "$ZPKG_SRC/busybox-1.36.1/Makefile" "$ZPKG_DESTROOT/share/dl-test-Makefile"

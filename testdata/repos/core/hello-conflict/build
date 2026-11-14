@@ -1,0 +1,11 @@
+#!/bin/sh
+# Deliberately installs the same path as the hello package, to exercise
+# collision detection.
+set -e
+
+mkdir -p "$ZPKG_DESTROOT/bin"
+cat > "$ZPKG_DESTROOT/bin/hello" <<'EOF'
+#!/bin/sh
+echo "conflicting hello"
+EOF
+chmod 755 "$ZPKG_DESTROOT/bin/hello"

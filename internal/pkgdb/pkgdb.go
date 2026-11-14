@@ -49,6 +49,9 @@ func (db DB) Get(name string) (*Rec, error) {
 	dir := db.recDir(name)
 	vb, err := os.ReadFile(filepath.Join(dir, "version"))
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%s: not installed", name)
+		}
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	entries, err := manifest.Read(filepath.Join(dir, "manifest"))
