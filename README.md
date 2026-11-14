@@ -40,7 +40,7 @@ $ZPKG_ROOT/bin/hello2
 
 | 変数 | 既定 | 内容 |
 |---|---|---|
-| `ZPKG_REPOS` | なし(必須) | コロン区切りのレシプリポジトリ。先頭一致検索・先頭が優先(overlay) |
+| `ZPKG_REPOS` | なし(必須) | レシプリポジトリ。OS のパス区切りで複数指定(Unix は `:`、Windows は `;`)。先頭一致検索・先頭が優先(overlay) |
 | `ZPKG_ROOT` | `/` | ターゲットルート |
 | `ZPKG_CACHE` | `$ZPKG_ROOT/var/cache/zpkg` | ソースキャッシュ・ビルド作業領域 |
 | `ZPKG_DB` | `$ZPKG_ROOT/var/lib/zpkg` | インストール済み DB |

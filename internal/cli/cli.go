@@ -26,8 +26,9 @@ Usage:
   zpkg search <term>      search recipe repos
 
 Environment:
-  ZPKG_REPOS   colon-separated recipe repo directories (required for
-               depends/build/install/search); first match wins
+  ZPKG_REPOS   recipe repo directories, separated by the OS path list
+               separator (';' on Windows, ':' on Unix); first match wins
+               (required for depends/build/install/search)
   ZPKG_ROOT    target system root (default /)
   ZPKG_CACHE   cache dir (default $ZPKG_ROOT/var/cache/zpkg)
   ZPKG_DB      package db dir (default $ZPKG_ROOT/var/lib/zpkg)

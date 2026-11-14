@@ -44,8 +44,10 @@ func splitRepos(v string) []string {
 	if v == "" {
 		return nil
 	}
+	// Use the OS path list separator (';' on Windows, ':' on Unix) so that
+	// drive-letter paths like "D:/repos/core" survive splitting on Windows.
 	var repos []string
-	for _, dir := range strings.Split(v, ":") {
+	for _, dir := range strings.Split(v, string(os.PathListSeparator)) {
 		if dir = strings.TrimSpace(dir); dir != "" {
 			repos = append(repos, dir)
 		}
