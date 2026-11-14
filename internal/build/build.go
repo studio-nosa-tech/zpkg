@@ -3,9 +3,11 @@ package build
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/studio-nosa-tech/zpkg/internal/config"
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
@@ -18,6 +20,21 @@ type Result struct {
 	Recipe   *recipe.Recipe
 	Destroot string
 	Entries  []manifest.Entry
+}
+
+func copyFile(src, dst string, perm os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }
 
 // Run fetches, verifies and extracts sources, then executes the build script
@@ -49,8 +66,18 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 			return nil, err
 		}
 		for _, f := range files {
-			if err := source.Extract(f, src); err != nil {
-				return nil, err
+			// Patch/diff sources are placed in the source root for the build
+			// script (e.g. patch -Np1 -i "$ZPKG_SRC/x.patch"); only archives
+			// are unpacked.
+			switch {
+			case strings.HasSuffix(f, ".patch"), strings.HasSuffix(f, ".diff"):
+				if err := copyFile(f, filepath.Join(src, filepath.Base(f)), 0o644); err != nil {
+					return nil, err
+				}
+			default:
+				if err := source.Extract(f, src); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
