@@ -88,6 +88,7 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 	cmd.Env = append(os.Environ(),
 		"ZPKG_NAME="+r.Name,
 		"ZPKG_VERSION="+r.Version,
+		"ZPKG_RECIPE_DIR="+r.Dir,
 		"ZPKG_ROOT="+cfg.Root,
 		"ZPKG_CACHE="+cfg.Cache,
 		"ZPKG_DESTROOT="+destroot,

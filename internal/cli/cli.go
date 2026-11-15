@@ -35,7 +35,9 @@ Environment:
   ZPKG_FORCE   set to 1 to allow removing modified packages
 
 Build scripts run under bash and receive ZPKG_NAME, ZPKG_VERSION,
-ZPKG_ROOT, ZPKG_CACHE, ZPKG_DESTROOT, ZPKG_SRC and ZPKG_WORKDIR.
+ZPKG_RECIPE_DIR, ZPKG_ROOT, ZPKG_CACHE, ZPKG_DESTROOT, ZPKG_SRC and
+ZPKG_WORKDIR. ZPKG_RECIPE_DIR lets recipes carry assets (kernel configs,
+extra files) next to their build script.
 `
 
 // Run dispatches a command line invocation.
