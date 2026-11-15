@@ -35,8 +35,22 @@ func copyFile(src, dst string, perm os.FileMode) error {
 		return err
 	}
 	defer out.Close()
-	_, err = io.Copy(out, in)
+	_, err = io.Copy(out, src)
 	return err
+}
+
+// isArchive reports whether a source file looks like a tar archive by
+// extension. Everything else (patches, PEM bundles, plain text) is copied
+// into the source root for the build script.
+func isArchive(name string) bool {
+	for _, ext := range []string{
+		".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tzst",
+	} {
+		if strings.HasSuffix(name, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 // PackBinpkg writes a binary package — a gzipped tar of the destroot — and
@@ -164,16 +178,15 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 			return nil, err
 		}
 		for _, f := range files {
-			// Patch/diff sources are placed in the source root for the build
-			// script (e.g. patch -Np1 -i "$ZPKG_SRC/x.patch"); only archives
-			// are unpacked.
-			switch {
-			case strings.HasSuffix(f, ".patch"), strings.HasSuffix(f, ".diff"):
-				if err := copyFile(f, filepath.Join(src, filepath.Base(f)), 0o644); err != nil {
+			// Non-archive sources (patches, PEM bundles, plain text) are
+			// placed in the source root for the build script; only tar
+			// archives are unpacked.
+			if isArchive(f) {
+				if err := source.Extract(f, src); err != nil {
 					return nil, err
 				}
-			default:
-				if err := source.Extract(f, src); err != nil {
+			} else {
+				if err := copyFile(f, filepath.Join(src, filepath.Base(f)), 0o644); err != nil {
 					return nil, err
 				}
 			}
