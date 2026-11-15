@@ -15,7 +15,9 @@ import (
 )
 
 // Fetch returns the cached file path for a source URL, downloading it on
-// first use.
+// first use. A URL fragment overrides the cache file name — GitHub tag
+// archives have useless basenames like "0.64.1.tar.gz", so recipes write
+// .../0.64.1.tar.gz#openrc-0.64.1.tar.gz.
 func Fetch(rawurl, cacheDir string) (string, error) {
 	u, err := url.Parse(rawurl)
 	if err != nil {
@@ -24,7 +26,10 @@ func Fetch(rawurl, cacheDir string) (string, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", fmt.Errorf("unsupported source scheme %q in %q", u.Scheme, rawurl)
 	}
-	name := filepath.Base(u.Path)
+	name := u.Fragment
+	if name == "" {
+		name = filepath.Base(u.Path)
+	}
 	if name == "" || name == "/" || name == "." {
 		return "", fmt.Errorf("cannot derive file name from %q", rawurl)
 	}
