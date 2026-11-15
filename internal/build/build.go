@@ -35,7 +35,7 @@ func copyFile(src, dst string, perm os.FileMode) error {
 		return err
 	}
 	defer out.Close()
-	_, err = io.Copy(out, src)
+	_, err = io.Copy(out, in)
 	return err
 }
 
