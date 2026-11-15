@@ -33,11 +33,15 @@ Environment:
   ZPKG_CACHE   cache dir (default $ZPKG_ROOT/var/cache/zpkg)
   ZPKG_DB      package db dir (default $ZPKG_ROOT/var/lib/zpkg)
   ZPKG_FORCE   set to 1 to allow removing modified packages
+  ZPKG_NO_BINPKG  set to 1 to always build from source (skip cached binpkgs)
 
 Build scripts run under bash and receive ZPKG_NAME, ZPKG_VERSION,
 ZPKG_RECIPE_DIR, ZPKG_ROOT, ZPKG_CACHE, ZPKG_DESTROOT, ZPKG_SRC and
 ZPKG_WORKDIR. ZPKG_RECIPE_DIR lets recipes carry assets (kernel configs,
 extra files) next to their build script.
+
+Successful builds are also packed into $ZPKG_CACHE/binpkgs as
+<name>-<version>.pkg.tar.gz; install reuses them instead of rebuilding.
 `
 
 // Run dispatches a command line invocation.
@@ -148,11 +152,21 @@ func cmdBuildInstall(targets []string, doInstall bool) error {
 		if err != nil {
 			return err
 		}
-		res, err := build.Run(r, cfg)
-		if err != nil {
-			return err
+		res := build.LoadBinpkg(r, cfg)
+		if res != nil {
+			fmt.Printf("installed from binpkg %s %s (%d files)\n", r.Name, r.Version, len(res.Entries))
+		} else {
+			res, err = build.Run(r, cfg)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("built %s %s (%d files)\n", r.Name, r.Version, len(res.Entries))
+			if pkgPath, err := build.PackBinpkg(r, res, cfg.Cache); err != nil {
+				fmt.Fprintln(os.Stderr, "zpkg: binpkg pack failed:", err)
+			} else {
+				fmt.Printf("binpkg: %s\n", pkgPath)
+			}
 		}
-		fmt.Printf("built %s %s (%d files)\n", r.Name, r.Version, len(res.Entries))
 		if !doInstall {
 			fmt.Printf("destroot: %s\n", res.Destroot)
 			continue

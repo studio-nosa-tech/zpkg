@@ -2,6 +2,8 @@
 package build
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"os"
@@ -35,6 +37,102 @@ func copyFile(src, dst string, perm os.FileMode) error {
 	defer out.Close()
 	_, err = io.Copy(out, in)
 	return err
+}
+
+// PackBinpkg writes a binary package — a gzipped tar of the destroot — and
+// a sidecar manifest into cacheDir/binpkgs, named <name>-<version>. This is
+// the local equivalent of Portage's buildpkg output.
+func PackBinpkg(r *recipe.Recipe, res *Result, cacheDir string) (string, error) {
+	dir := filepath.Join(cacheDir, "binpkgs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	base := r.Name + "-" + r.Version
+	pkgPath := filepath.Join(dir, base+".pkg.tar.gz")
+
+	f, err := os.Create(pkgPath)
+	if err != nil {
+		return "", err
+	}
+	gzw := gzip.NewWriter(f)
+	tw := tar.NewWriter(gzw)
+
+	for _, e := range res.Entries {
+		hdr := &tar.Header{Name: e.Path}
+		switch e.Kind {
+		case "dir":
+			hdr.Typeflag = tar.TypeDir
+			hdr.Mode = 0o755
+		case "link":
+			hdr.Typeflag = tar.TypeSymlink
+			hdr.Linkname = e.Link
+		default:
+			full := filepath.Join(res.Destroot, filepath.FromSlash(e.Path))
+			info, err := os.Stat(full)
+			if err != nil {
+				return "", err
+			}
+			hdr.Typeflag = tar.TypeReg
+			hdr.Mode = int64(info.Mode().Perm())
+			hdr.Size = info.Size()
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return "", err
+		}
+		if hdr.Typeflag == tar.TypeReg {
+			in, err := os.Open(filepath.Join(res.Destroot, filepath.FromSlash(e.Path)))
+			if err != nil {
+				return "", err
+			}
+			if _, err := io.Copy(tw, in); err != nil {
+				in.Close()
+				return "", err
+			}
+			in.Close()
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return "", err
+	}
+	if err := gzw.Close(); err != nil {
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+
+	if err := manifest.Write(filepath.Join(dir, base+".manifest"), res.Entries); err != nil {
+		return "", err
+	}
+	return pkgPath, nil
+}
+
+// LoadBinpkg returns a Result restored from a cached binpkg, or nil when
+// none exists (or ZPKG_NO_BINPKG=1 forces a source build).
+func LoadBinpkg(r *recipe.Recipe, cfg config.Config) *Result {
+	if os.Getenv("ZPKG_NO_BINPKG") == "1" {
+		return nil
+	}
+	dir := filepath.Join(cfg.Cache, "binpkgs")
+	base := r.Name + "-" + r.Version
+	entries, err := manifest.Read(filepath.Join(dir, base+".manifest"))
+	if err != nil {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(dir, base+".pkg.tar.gz")); err != nil {
+		return nil
+	}
+	tmp := filepath.Join(cfg.Cache, "build", r.Name, "binpkg")
+	if err := os.RemoveAll(tmp); err != nil {
+		return nil
+	}
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
+		return nil
+	}
+	if err := source.Extract(filepath.Join(dir, base+".pkg.tar.gz"), tmp); err != nil {
+		return nil
+	}
+	return &Result{Recipe: r, Destroot: tmp, Entries: entries}
 }
 
 // Run fetches, verifies and extracts sources, then executes the build script
