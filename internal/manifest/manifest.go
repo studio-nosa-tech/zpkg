@@ -19,6 +19,14 @@ type Entry struct {
 	Path string // path relative to the root, slash-separated
 }
 
+// Ignored reports paths that are generated indexes rather than package
+// content: install-info maintains usr/share/info/dir, so every
+// info-bearing package would collide on it. It is excluded from
+// inventories and ownership checks.
+func Ignored(path string) bool {
+	return path == "usr/share/info/dir"
+}
+
 // String renders the manifest line format.
 func (e Entry) String() string {
 	switch e.Kind {
@@ -75,6 +83,9 @@ func FromRoot(root string) ([]Entry, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
+		if Ignored(rel) {
+			return nil
+		}
 		info, err := d.Info()
 		if err != nil {
 			return err

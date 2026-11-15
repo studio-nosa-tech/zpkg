@@ -16,7 +16,7 @@ import (
 func Apply(rec *pkgdb.Rec, destroot, root string, db pkgdb.DB) error {
 	// Reject any file already owned by a different installed package.
 	for _, e := range rec.Entries {
-		if e.Kind == "dir" {
+		if e.Kind == "dir" || manifest.Ignored(e.Path) {
 			continue
 		}
 		owner, err := db.Owner(e.Path)
