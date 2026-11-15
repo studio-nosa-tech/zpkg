@@ -60,13 +60,23 @@ func applyEntry(e manifest.Entry, destroot, root string) error {
 		if err != nil {
 			return err
 		}
-		out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+		// Write to a temp file and rename over the destination. Renaming is
+		// allowed where truncating a busy (running) binary is not; this is
+		// what lets zpkg replace bash - and itself - while running.
+		tmp := dst + ".zpkg-new"
+		out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
 		if err != nil {
 			return err
 		}
-		defer out.Close()
 		_, err = io.Copy(out, src)
-		return err
+		if closeErr := out.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			os.Remove(tmp)
+			return err
+		}
+		return os.Rename(tmp, dst)
 	}
 }
 
