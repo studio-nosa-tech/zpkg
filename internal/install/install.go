@@ -76,6 +76,14 @@ func applyEntry(e manifest.Entry, destroot, root string) error {
 			os.Remove(tmp)
 			return err
 		}
+		// open(2) ignores the setuid/setgid bits, so apply the full mode
+		// explicitly. Without this, setuid helpers (doas, sudo, passwd)
+		// would be installed as plain executables.
+		full := info.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
+		if err := os.Chmod(tmp, full); err != nil {
+			os.Remove(tmp)
+			return err
+		}
 		return os.Rename(tmp, dst)
 	}
 }

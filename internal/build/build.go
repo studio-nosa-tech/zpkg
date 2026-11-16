@@ -86,9 +86,15 @@ func PackBinpkg(r *recipe.Recipe, res *Result, cacheDir string) (string, error) 
 			if err != nil {
 				return "", err
 			}
+			// FileInfoHeader maps the Go mode to raw tar mode bits,
+			// including setuid/setgid/sticky.
+			var hdrErr error
+			hdr, hdrErr = tar.FileInfoHeader(info, "")
+			if hdrErr != nil {
+				return "", hdrErr
+			}
+			hdr.Name = e.Path
 			hdr.Typeflag = tar.TypeReg
-			hdr.Mode = int64(info.Mode().Perm())
-			hdr.Size = info.Size()
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return "", err
