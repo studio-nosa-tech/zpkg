@@ -270,6 +270,12 @@ func writeAtomic(path string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 
+// ReadVar returns KEY=value from a make.conf style file under root (the
+// path is relative to root). Empty when the file or key is absent.
+func ReadVar(root, relPath, key string) (string, error) {
+	return readVar(filepath.Join(root, filepath.FromSlash(relPath)), key)
+}
+
 // readVar returns KEY=value from a make.conf style file.
 func readVar(path, key string) (string, error) {
 	data, err := os.ReadFile(path)

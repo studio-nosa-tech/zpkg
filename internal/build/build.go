@@ -139,6 +139,9 @@ func PackBinpkg(r *recipe.Recipe, res *Result, cacheDir, optsHash string) (strin
 	if err := manifest.Write(filepath.Join(dir, base+".manifest"), res.Entries); err != nil {
 		return "", err
 	}
+	if err := writeBinMeta(dir, base, r, optsHash); err != nil {
+		return "", err
+	}
 	return pkgPath, nil
 }
 

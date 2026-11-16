@@ -31,6 +31,8 @@ Usage:
   zpkg owner <path>...        which package owns a path
   zpkg world                  packages installed explicitly
   zpkg search <term>          search recipe repos
+  zpkg mkindex [dir]          write index.json for a binary package
+                              repository dir (default: the local binpkg cache)
   zpkg use [flag | -flag]...  show or edit /etc/zpkg/use.conf (USE flags)
   zpkg use --package <pkg> [flag | -flag]...
                               show or edit the package's line in package.use
@@ -45,7 +47,13 @@ Environment:
   ZPKG_CACHE   cache dir (default $ZPKG_ROOT/var/cache/zpkg)
   ZPKG_DB      package db dir (default $ZPKG_ROOT/var/lib/zpkg)
   ZPKG_FORCE   set to 1 to allow removing modified packages
-  ZPKG_NO_BINPKG  set to 1 to always build from source (skip cached binpkgs)
+  ZPKG_NO_BINPKG  set to 1 to always build from source (skip cached binpkgs
+                  and binary repositories)
+  ZPKG_BINREPO    base URL/path of a binary package repository; install
+                  tries a matching package from it before building from
+                  source (or set BINREPO= in /etc/zpkg/binrepo.conf). A
+                  match requires the same version, revision and effective
+                  USE flags
 
 World: packages you name on "install" are recorded in $ZPKG_DB/world and are
 what "upgrade" acts on. Dependencies are installed but not added to world.
@@ -124,6 +132,8 @@ func Run(args []string) error {
 		return cmdUse(rest)
 	case "recover":
 		return cmdRecover()
+	case "mkindex":
+		return cmdMkIndex(rest)
 	default:
 		return fmt.Errorf("unknown command %q (try: zpkg help)", cmd)
 	}

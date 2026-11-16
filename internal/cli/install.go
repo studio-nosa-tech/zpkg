@@ -252,3 +252,23 @@ func cmdRecover() error {
 	fmt.Println(msg)
 	return nil
 }
+
+// cmdMkIndex writes index.json for a binary package repository directory.
+// With no argument the local binpkg cache is indexed, so the same command
+// both seeds a private repository and prepares the cache for copying.
+func cmdMkIndex(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	dir := cfg.Cache + "/binpkgs"
+	if len(args) > 0 {
+		dir = args[0]
+	}
+	n, err := build.MakeIndex(dir)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("indexed %d packages in %s\n", n, dir)
+	return nil
+}
