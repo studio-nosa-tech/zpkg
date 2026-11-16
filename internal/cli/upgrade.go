@@ -11,7 +11,8 @@ import (
 )
 
 // cmdUpgrade brings the world set (or the named packages) up to the
-// versions the recipe tree offers.
+// versions the recipe tree offers. With --newuse a package is also rebuilt
+// when its effective USE flags changed since installation.
 func cmdUpgrade(targets []string, o installOptions) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -46,13 +47,22 @@ func cmdUpgrade(targets []string, o installOptions) error {
 			fmt.Printf("%s: not installed (use zpkg install)\n", name)
 			continue
 		}
-		if version.Compare(rec.VersionString(), r.FullVersion()) >= 0 {
+		behind := version.Compare(rec.VersionString(), r.FullVersion()) < 0
+		changed := ""
+		if o.newuse && useFlagsChanged(rec, name, cfg) {
+			changed = " (use flags changed)"
+		}
+		if !behind && changed == "" {
 			if len(targets) > 0 {
 				fmt.Printf("%s %s is up to date\n", name, rec.VersionString())
 			}
 			continue
 		}
-		fmt.Printf("%s: %s -> %s\n", name, rec.VersionString(), r.FullVersion())
+		if behind {
+			fmt.Printf("%s: %s -> %s%s\n", name, rec.VersionString(), r.FullVersion(), changed)
+		} else {
+			fmt.Printf("%s: rebuilding%s\n", name, changed)
+		}
 		upgradable = append(upgradable, name)
 	}
 	if len(upgradable) == 0 {
@@ -63,6 +73,26 @@ func cmdUpgrade(targets []string, o installOptions) error {
 	}
 	o.force = true
 	return cmdBuildInstall(upgradable, true, o)
+}
+
+// useFlagsChanged reports whether the effective USE flags of name differ
+// from the ones recorded at install time. v1 records (no meta) never count
+// as changed.
+func useFlagsChanged(rec *pkgdb.Rec, name string, cfg config.Config) bool {
+	if rec.Meta == nil {
+		return false
+	}
+	current := cfg.Options.ForPackage(name).Use
+	installed := rec.Meta.UseFlags
+	if len(current) != len(installed) {
+		return true
+	}
+	for i := range current {
+		if current[i] != installed[i] {
+			return true
+		}
+	}
+	return false
 }
 
 // cmdWorld prints the packages installed explicitly.

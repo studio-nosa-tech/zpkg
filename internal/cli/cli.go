@@ -21,8 +21,10 @@ Usage:
                               -f  rebuild/reinstall even if installed
                               -p  pretend: show what would happen
                               --asdeps  do not add the target to world
-  zpkg upgrade [-p] [pkg]...  upgrade world (or the named packages) to the
-                              recipe versions
+  zpkg upgrade [-p] [--newuse] [pkg]...
+                              upgrade world (or the named packages) to the
+                              recipe versions; --newuse also rebuilds a
+                              package whose effective USE flags changed
   zpkg remove <pkg>...        remove installed packages (and world entries)
   zpkg list                   list installed packages
   zpkg info <pkg>...          installed metadata and the available recipe
@@ -62,6 +64,7 @@ type installOptions struct {
 	force   bool
 	pretend bool
 	asdeps  bool
+	newuse  bool // upgrade: rebuild when effective USE flags changed
 }
 
 // parseInstallArgs separates flags from package names.
@@ -74,6 +77,8 @@ func parseInstallArgs(args []string) (targets []string, o installOptions) {
 			o.pretend = true
 		case "--asdeps":
 			o.asdeps = true
+		case "--newuse":
+			o.newuse = true
 		default:
 			targets = append(targets, a)
 		}
