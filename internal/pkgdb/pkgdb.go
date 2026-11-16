@@ -151,7 +151,14 @@ func (db DB) Save(rec *Rec) error {
 	if err := writeFileAtomic(filepath.Join(dir, "meta.json"), append(mb, '\n'), 0o644); err != nil {
 		return err
 	}
-	return manifest.Write(filepath.Join(dir, "manifest"), rec.Entries)
+	if err := manifest.Write(filepath.Join(dir, "manifest"), rec.Entries); err != nil {
+		return err
+	}
+	// The record is the source of truth for remove/owner; make sure it is
+	// on stable storage before the caller reports success.
+	syncFile(filepath.Join(dir, "manifest"))
+	syncDir(dir)
+	return nil
 }
 
 // Delete removes the record of name.
@@ -161,8 +168,41 @@ func (db DB) Delete(name string) error {
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	syncDir(filepath.Dir(path))
+	return nil
+}
+
+func syncFile(path string) {
+	if f, err := os.Open(path); err == nil {
+		f.Sync()
+		f.Close()
+	}
+}
+
+func syncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
+		d.Sync()
+		d.Close()
+	}
 }

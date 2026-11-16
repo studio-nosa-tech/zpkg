@@ -1,4 +1,6 @@
 // Package install applies destroots to the target root and removes packages.
+// Every operation is journalled: an interrupted apply is rolled back and an
+// interrupted removal is completed by the next zpkg run.
 package install
 
 import (
@@ -13,7 +15,15 @@ import (
 )
 
 // Apply copies a built destroot into root and records the package in db.
+// The whole apply is one transaction: either the package ends up fully
+// installed with its DB record, or the system is left as it was.
 func Apply(rec *pkgdb.Rec, destroot, root string, db pkgdb.DB) error {
+	if msg, err := Recover(root, db); err != nil {
+		return err
+	} else if msg != "" {
+		fmt.Fprintln(os.Stderr, "zpkg:", msg)
+	}
+
 	// Reject any file already owned by a different installed package.
 	for _, e := range rec.Entries {
 		if e.Kind == "dir" || manifest.Ignored(e.Path) {
@@ -27,12 +37,64 @@ func Apply(rec *pkgdb.Rec, destroot, root string, db pkgdb.DB) error {
 			return fmt.Errorf("%s: already owned by %s", e.Path, owner)
 		}
 	}
-	for _, e := range rec.Entries {
-		if err := applyEntry(e, destroot, root); err != nil {
-			return err
-		}
+
+	j := &txnJournal{Kind: "install", Name: rec.Name, Version: rec.VersionString(), Phase: phaseInstalling}
+	if _, err := db.Get(rec.Name); err == nil {
+		j.HadRecord = true // upgrade: keep the old record if we must roll back
 	}
-	return db.Save(rec)
+	if err := saveJournal(db, j); err != nil {
+		return err
+	}
+	backup := filepath.Join(txnDir(db), "backup")
+
+	// applyAll returns the first error; the deferred rollback puts the
+	// system back the way it was before returning it.
+	applyErr := func() error {
+		for _, e := range rec.Entries {
+			switch e.Kind {
+			case "dir":
+				if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(e.Path)), 0o755); err != nil {
+					return err
+				}
+			case "file", "link":
+				dst := filepath.Join(root, filepath.FromSlash(e.Path))
+				if _, err := os.Lstat(dst); err == nil {
+					// Something is already there: move it aside so a failure
+					// later in the apply can put it back.
+					bk := filepath.Join(backup, filepath.FromSlash(e.Path))
+					if err := os.MkdirAll(filepath.Dir(bk), 0o755); err != nil {
+						return err
+					}
+					if err := os.Rename(dst, bk); err != nil {
+						return err
+					}
+					j.Replaced = append(j.Replaced, e.Path)
+				} else {
+					j.Created = append(j.Created, e.Path)
+				}
+				if err := saveJournal(db, j); err != nil {
+					return err
+				}
+				if err := applyEntry(e, destroot, root); err != nil {
+					return err
+				}
+			}
+		}
+		j.Phase = phaseInstalled
+		return saveJournal(db, j)
+	}()
+	if applyErr != nil {
+		if rbErr := rollbackInstall(root, db, j); rbErr != nil {
+			return fmt.Errorf("%w (rollback also failed: %v — run zpkg recover)", applyErr, rbErr)
+		}
+		return applyErr
+	}
+
+	if err := db.Save(rec); err != nil {
+		return err
+	}
+	// Committed: the journal and the backups are no longer needed.
+	return os.RemoveAll(txnDir(db))
 }
 
 func applyEntry(e manifest.Entry, destroot, root string) error {
@@ -88,8 +150,16 @@ func applyEntry(e manifest.Entry, destroot, root string) error {
 	}
 }
 
-// Remove deletes the files of an installed package and its record.
+// Remove deletes the files of an installed package and its record. The
+// removal is journalled, so an interrupted removal is finished by the next
+// zpkg operation.
 func Remove(name, root string, db pkgdb.DB) error {
+	if msg, err := Recover(root, db); err != nil {
+		return err
+	} else if msg != "" {
+		fmt.Fprintln(os.Stderr, "zpkg:", msg)
+	}
+
 	rec, err := db.Get(name)
 	if err != nil {
 		return err
@@ -97,6 +167,18 @@ func Remove(name, root string, db pkgdb.DB) error {
 	if err := checkIntegrity(rec, root); err != nil {
 		return err
 	}
+
+	var files []string
+	for _, e := range rec.Entries {
+		if e.Kind != "dir" {
+			files = append(files, e.Path)
+		}
+	}
+	j := &txnJournal{Kind: "remove", Name: rec.Name, Version: rec.VersionString(), Phase: phaseRemoving, Files: files}
+	if err := saveJournal(db, j); err != nil {
+		return err
+	}
+
 	// Files and links first (entries are sorted by path, so reverse iteration
 	// is deepest first), then prune now-empty directories.
 	for i := len(rec.Entries) - 1; i >= 0; i-- {
@@ -115,7 +197,10 @@ func Remove(name, root string, db pkgdb.DB) error {
 		}
 		os.Remove(filepath.Join(root, filepath.FromSlash(e.Path))) // best effort: only prunes empty dirs
 	}
-	return db.Delete(name)
+	if err := db.Delete(name); err != nil {
+		return err
+	}
+	return os.RemoveAll(txnDir(db))
 }
 
 func checkIntegrity(rec *pkgdb.Rec, root string) error {

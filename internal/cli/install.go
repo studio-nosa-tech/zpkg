@@ -233,3 +233,22 @@ func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
+
+// cmdRecover repairs the state left by an interrupted install or removal.
+func cmdRecover() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db := pkgdb.DB{Dir: cfg.DB}
+	msg, err := install.Recover(cfg.Root, db)
+	if err != nil {
+		return err
+	}
+	if msg == "" {
+		fmt.Println("no interrupted transaction")
+		return nil
+	}
+	fmt.Println(msg)
+	return nil
+}

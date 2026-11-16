@@ -32,6 +32,7 @@ Usage:
   zpkg use [flag | -flag]...  show or edit /etc/zpkg/use.conf (USE flags)
   zpkg use --package <pkg> [flag | -flag]...
                               show or edit the package's line in package.use
+  zpkg recover                roll back / complete an interrupted transaction
 
 Environment:
   ZPKG_REPOS   recipe repo directories, separated by the OS path list
@@ -116,6 +117,8 @@ func Run(args []string) error {
 		return withArgs(cmd, rest, cmdSearch)
 	case "use":
 		return cmdUse(rest)
+	case "recover":
+		return cmdRecover()
 	default:
 		return fmt.Errorf("unknown command %q (try: zpkg help)", cmd)
 	}
