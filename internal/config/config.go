@@ -37,6 +37,16 @@ func Load() (Config, error) {
 	if cfg.DB == "" {
 		cfg.DB = filepath.Join(absRoot, "var", "lib", "zpkg")
 	}
+	if len(cfg.Repos) == 0 {
+		// Default to the recipe tree shipped with the system. Categories
+		// are searched in this order (core first, then the extras).
+		for _, cat := range []string{"core", "main", "desktop"} {
+			d := filepath.Join(absRoot, "usr", "share", "zignos", "recipes", cat)
+			if fi, err := os.Stat(d); err == nil && fi.IsDir() {
+				cfg.Repos = append(cfg.Repos, d)
+			}
+		}
+	}
 	return cfg, nil
 }
 

@@ -28,8 +28,9 @@ Usage:
 
 Environment:
   ZPKG_REPOS   recipe repo directories, separated by the OS path list
-               separator (';' on Windows, ':' on Unix); first match wins
-               (required for depends/build/install/search)
+               separator (';' on Windows, ':' on Unix); first match wins.
+               Defaults to the tree shipped in $ZPKG_ROOT/usr/share/zignos/
+               recipes (core, main, desktop) when unset
   ZPKG_ROOT    target system root (default /)
   ZPKG_CACHE   cache dir (default $ZPKG_ROOT/var/cache/zpkg)
   ZPKG_DB      package db dir (default $ZPKG_ROOT/var/lib/zpkg)
@@ -107,7 +108,7 @@ func contains(names []string, name string) bool {
 
 func requireRepos(cfg config.Config) error {
 	if len(cfg.Repos) == 0 {
-		return fmt.Errorf("ZPKG_REPOS is not set; point it at recipe repo directories (colon-separated)")
+		return fmt.Errorf("no recipe repos found: set ZPKG_REPOS or install the /usr/share/zignos/recipes tree")
 	}
 	return nil
 }
