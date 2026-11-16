@@ -117,6 +117,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		}
 		rec := &pkgdb.Rec{
 			Name:     r.Name,
+			Slot:     r.Slot,
 			Version:  r.Version,
 			Revision: r.Revision,
 			Entries:  res.Entries,
