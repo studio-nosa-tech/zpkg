@@ -19,8 +19,9 @@ const usage = `zpkg - ZIGNOS package manager (v0)
 
 Usage:
   zpkg depends <pkg>...   print build order including dependencies
-  zpkg build <pkg>...     fetch, verify and build into a destroot (no install)
-  zpkg install <pkg>...   build if needed, then install into ZPKG_ROOT
+  zpkg build [-f] <pkg>...    fetch, verify and build into a destroot (no install)
+  zpkg install [-f] <pkg>...  build if needed, then install into ZPKG_ROOT
+                              (-f rebuilds and reinstalls even if installed)
   zpkg remove <pkg>...    remove installed packages
   zpkg list               list installed packages
   zpkg search <term>      search recipe repos
@@ -58,9 +59,11 @@ func Run(args []string) error {
 	case "depends":
 		return withArgs(cmd, rest, cmdDepends)
 	case "build":
-		return withArgs(cmd, rest, func(targets []string) error { return cmdBuildInstall(targets, false) })
+		targets, force := splitForce(rest)
+		return withArgs(cmd, targets, func(targets []string) error { return cmdBuildInstall(targets, false, force) })
 	case "install":
-		return withArgs(cmd, rest, func(targets []string) error { return cmdBuildInstall(targets, true) })
+		targets, force := splitForce(rest)
+		return withArgs(cmd, targets, func(targets []string) error { return cmdBuildInstall(targets, true, force) })
 	case "remove":
 		return withArgs(cmd, rest, cmdRemove)
 	case "list":
@@ -72,11 +75,34 @@ func Run(args []string) error {
 	}
 }
 
+// splitForce separates the -f/--force flag from the package arguments.
+func splitForce(args []string) (targets []string, force bool) {
+	for _, a := range args {
+		switch a {
+		case "-f", "--force":
+			force = true
+		default:
+			targets = append(targets, a)
+		}
+	}
+	return targets, force
+}
+
 func withArgs(name string, args []string, fn func([]string) error) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: zpkg %s <pkg>...", name)
 	}
 	return fn(args)
+}
+
+// contains reports whether name is one of the requested targets.
+func contains(names []string, name string) bool {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 func requireRepos(cfg config.Config) error {
@@ -117,8 +143,8 @@ func cmdDepends(targets []string) error {
 }
 
 // cmdBuildInstall builds each package in dependency order, skipping already
-// installed ones, optionally installing as it goes.
-func cmdBuildInstall(targets []string, doInstall bool) error {
+// installed ones (unless force), optionally installing as it goes.
+func cmdBuildInstall(targets []string, doInstall, force bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
