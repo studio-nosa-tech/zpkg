@@ -94,6 +94,11 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		}
 		opts := cfg.Options.ForPackage(r.Name)
 		res := build.LoadBinpkg(r, cfg)
+		if res == nil {
+			// No local cache hit: try a configured binary package
+			// repository before falling back to a source build.
+			res = build.LoadRepoBinpkg(r, cfg)
+		}
 		if res != nil {
 			fmt.Printf("installed from binpkg %s %s (%d files)\n", r.Name, r.FullVersion(), len(res.Entries))
 		} else {
