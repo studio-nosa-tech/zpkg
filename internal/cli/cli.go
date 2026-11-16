@@ -29,6 +29,7 @@ Usage:
   zpkg owner <path>...        which package owns a path
   zpkg world                  packages installed explicitly
   zpkg search <term>          search recipe repos
+  zpkg use [flag | -flag]...  show or edit /etc/zpkg/use.conf (USE flags)
 
 Environment:
   ZPKG_REPOS   recipe repo directories, separated by the OS path list
@@ -111,6 +112,8 @@ func Run(args []string) error {
 		return cmdWorld()
 	case "search":
 		return withArgs(cmd, rest, cmdSearch)
+	case "use":
+		return cmdUse(rest)
 	default:
 		return fmt.Errorf("unknown command %q (try: zpkg help)", cmd)
 	}
@@ -156,7 +159,7 @@ func resolve(cfg config.Config, targets []string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		return recipeDeps(r), nil
+		return cfg.Options.Expand(recipeDeps(r)), nil
 	}
 	return dep.Order(targets, load)
 }

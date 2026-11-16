@@ -84,6 +84,9 @@ func cmdInfo(names []string) error {
 				}
 			}
 			fmt.Println(line)
+			if rec.Meta != nil && len(rec.Meta.UseFlags) > 0 {
+				fmt.Printf("  useflags: %s\n", joinDeps(rec.Meta.UseFlags))
+			}
 		} else {
 			fmt.Println("  installed: -")
 		}

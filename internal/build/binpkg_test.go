@@ -34,7 +34,7 @@ func TestPackBinpkgRoundtrip(t *testing.T) {
 	res := &Result{Recipe: r, Destroot: root, Entries: entries}
 
 	cache := t.TempDir()
-	pkgPath, err := PackBinpkg(r, res, cache)
+	pkgPath, err := PackBinpkg(r, res, cache, "")
 	if err != nil {
 		t.Fatal(err)
 	}

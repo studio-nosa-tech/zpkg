@@ -16,7 +16,7 @@ import (
 
 // metaFromRecipe captures the provenance of an install so later upgrades
 // and queries do not need to re-read the recipe tree.
-func metaFromRecipe(r *recipe.Recipe) *pkgdb.Meta {
+func metaFromRecipe(r *recipe.Recipe, use []string) *pkgdb.Meta {
 	return &pkgdb.Meta{
 		Schema:    pkgdb.Schema,
 		Name:      r.Name,
@@ -26,6 +26,7 @@ func metaFromRecipe(r *recipe.Recipe) *pkgdb.Meta {
 		Repo:      r.Repo,
 		Arch:      runtime.GOARCH,
 		Installed: time.Now().UTC().Format(time.RFC3339),
+		UseFlags:  append([]string{}, use...),
 		Depends:   append([]string{}, r.Depends...),
 		BuildDeps: append([]string{}, r.MakeDepends...),
 	}
@@ -96,7 +97,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 				return err
 			}
 			fmt.Printf("built %s %s (%d files)\n", r.Name, r.FullVersion(), len(res.Entries))
-			if pkgPath, err := build.PackBinpkg(r, res, cfg.Cache); err != nil {
+			if pkgPath, err := build.PackBinpkg(r, res, cfg.Cache, cfg.Options.Hash()); err != nil {
 				fmt.Fprintln(os.Stderr, "zpkg: binpkg pack failed:", err)
 			} else {
 				fmt.Printf("binpkg: %s\n", pkgPath)
@@ -111,7 +112,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 			Version:  r.Version,
 			Revision: r.Revision,
 			Entries:  res.Entries,
-			Meta:     metaFromRecipe(r),
+			Meta:     metaFromRecipe(r, cfg.Options.Use),
 		}
 		if err := install.Apply(rec, res.Destroot, cfg.Root, db); err != nil {
 			return err

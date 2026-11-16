@@ -19,12 +19,15 @@ import (
 )
 
 // pkgBase is the cache key for a recipe: name-version, plus -rN when the
-// recipe has a revision. Baking the revision in keeps old and new builds
-// from being confused.
-func pkgBase(r *recipe.Recipe) string {
+// recipe has a revision, plus a short options hash when USE/CFLAGS/MAKEOPTS
+// are set. Baking both in keeps builds with different inputs apart.
+func pkgBase(r *recipe.Recipe, optsHash string) string {
 	base := r.Name + "-" + r.Version
 	if r.Revision > 0 {
 		base += "-r" + strconv.Itoa(r.Revision)
+	}
+	if optsHash != "" {
+		base += "-" + optsHash
 	}
 	return base
 }
@@ -68,12 +71,12 @@ func isArchive(name string) bool {
 // PackBinpkg writes a binary package — a gzipped tar of the destroot — and
 // a sidecar manifest into cacheDir/binpkgs, named <name>-<version>. This is
 // the local equivalent of Portage's buildpkg output.
-func PackBinpkg(r *recipe.Recipe, res *Result, cacheDir string) (string, error) {
+func PackBinpkg(r *recipe.Recipe, res *Result, cacheDir, optsHash string) (string, error) {
 	dir := filepath.Join(cacheDir, "binpkgs")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	base := pkgBase(r)
+	base := pkgBase(r, optsHash)
 	pkgPath := filepath.Join(dir, base+".pkg.tar.gz")
 
 	f, err := os.Create(pkgPath)
@@ -146,7 +149,7 @@ func LoadBinpkg(r *recipe.Recipe, cfg config.Config) *Result {
 		return nil
 	}
 	dir := filepath.Join(cfg.Cache, "binpkgs")
-	base := pkgBase(r)
+	base := pkgBase(r, cfg.Options.Hash())
 	entries, err := manifest.Read(filepath.Join(dir, base+".manifest"))
 	if err != nil {
 		return nil
@@ -223,6 +226,9 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 		"ZPKG_DESTROOT="+destroot,
 		"ZPKG_SRC="+src,
 		"ZPKG_WORKDIR="+work,
+		"ZPKG_USE="+strings.Join(cfg.Options.Use, " "),
+		"ZPKG_CFLAGS="+cfg.Options.CFlags,
+		"ZPKG_MAKEOPTS="+cfg.Options.MakeOpts,
 	)
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%s: build script failed: %w", r.Name, err)

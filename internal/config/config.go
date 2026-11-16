@@ -5,14 +5,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/studio-nosa-tech/zpkg/internal/options"
 )
 
 // Config holds the runtime layout.
 type Config struct {
-	Repos []string // recipe repos, in search order (first match wins)
-	Root  string   // target system root, absolute
-	Cache string   // source downloads and build workdirs
-	DB    string   // installed package database
+	Repos   []string        // recipe repos, in search order (first match wins)
+	Root    string          // target system root, absolute
+	Cache   string          // source downloads and build workdirs
+	DB      string          // installed package database
+	Options options.Options // USE flags and build options for Root
 }
 
 // Load builds a Config from the ZPKG_* environment variables.
@@ -46,6 +49,10 @@ func Load() (Config, error) {
 				cfg.Repos = append(cfg.Repos, d)
 			}
 		}
+	}
+	cfg.Options, err = options.Load(absRoot)
+	if err != nil {
+		return Config{}, err
 	}
 	return cfg, nil
 }
