@@ -58,6 +58,19 @@ func TestEnvOverride(t *testing.T) {
 	}
 }
 
+func TestEnvEmptyOverride(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "etc/zpkg/use.conf"), "fileflag\n")
+	t.Setenv("ZPKG_USE", "") // present but empty: clears the file flags
+	o, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(o.Use) != 0 {
+		t.Fatalf("Use = %v, want empty", o.Use)
+	}
+}
+
 func TestExpand(t *testing.T) {
 	o := Options{set: map[string]bool{"x11": true}}
 	deps := []string{"glibc", "x11?libxcb", "wayland?libwayland", "x11?"}

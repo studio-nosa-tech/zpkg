@@ -38,7 +38,9 @@ func Load(root string) (Options, error) {
 	if err != nil {
 		return o, err
 	}
-	if env := strings.TrimSpace(os.Getenv("ZPKG_USE")); env != "" {
+	// An explicitly empty variable means "no flags" and must override the
+	// file, so use LookupEnv rather than treating "" as unset.
+	if env, ok := os.LookupEnv("ZPKG_USE"); ok {
 		flags = strings.Fields(env)
 	}
 	for _, f := range flags {
@@ -51,7 +53,7 @@ func Load(root string) (Options, error) {
 	} else if v != "" {
 		o.CFlags = v
 	}
-	if env := os.Getenv("ZPKG_CFLAGS"); env != "" {
+	if env, ok := os.LookupEnv("ZPKG_CFLAGS"); ok {
 		o.CFlags = env
 	}
 	if v, err := readVar(makePath(root), "MAKEOPTS"); err != nil {
@@ -59,7 +61,7 @@ func Load(root string) (Options, error) {
 	} else if v != "" {
 		o.MakeOpts = v
 	}
-	if env := os.Getenv("ZPKG_MAKEOPTS"); env != "" {
+	if env, ok := os.LookupEnv("ZPKG_MAKEOPTS"); ok {
 		o.MakeOpts = env
 	}
 	return o, nil
