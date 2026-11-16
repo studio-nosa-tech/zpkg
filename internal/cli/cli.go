@@ -170,7 +170,10 @@ func cmdBuildInstall(targets []string, doInstall, force bool) error {
 		return err
 	}
 	for _, name := range order {
-		if installed[name] {
+		// With force every named target is rebuilt and reinstalled;
+		// dependencies that are already present are still skipped so
+		// only the requested packages are replaced.
+		if installed[name] && !(force && contains(targets, name)) {
 			fmt.Printf("skipping %s (already installed)\n", name)
 			continue
 		}
