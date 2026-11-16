@@ -41,6 +41,7 @@ type Meta struct {
 // Rec is one installed package record.
 type Rec struct {
 	Name     string
+	Slot     string // "0" unless the recipe declares a slot
 	Version  string
 	Revision int
 	Entries  []manifest.Entry
@@ -50,12 +51,36 @@ type Rec struct {
 // VersionString is the canonical "pkgver-rN" form.
 func (r *Rec) VersionString() string { return version.String(r.Version, r.Revision) }
 
-func (db DB) recDir(name string) string {
-	return filepath.Join(db.Dir, name)
+// RecKey is the DB directory key for a name/slot pair. Slot "0" (the
+// default) keeps the legacy plain-name layout, so records written before
+// slots existed need no migration; other slots get "name@slot".
+func SlotKey(name, slot string) string {
+	if slot == "" || slot == "0" {
+		return name
+	}
+	return name + "@" + slot
 }
 
-// List returns installed package names, sorted.
-func (db DB) List() ([]string, error) {
+// Ref identifies one installed record by name and slot.
+type Ref struct {
+	Name string
+	Slot string
+}
+
+// String renders name or name@slot (non-zero slots only).
+func (r Ref) String() string {
+	if r.Slot == "" || r.Slot == "0" {
+		return r.Name
+	}
+	return r.Name + "@" + r.Slot
+}
+
+func (db DB) recDir(name, slot string) string {
+	return filepath.Join(db.Dir, SlotKey(name, slot))
+}
+
+// List returns the installed records as name/slot refs, sorted by key.
+func (db DB) List() ([]Ref, error) {
 	items, err := os.ReadDir(db.Dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -63,19 +88,30 @@ func (db DB) List() ([]string, error) {
 		}
 		return nil, err
 	}
-	var names []string
+	var refs []Ref
 	for _, it := range items {
-		if it.IsDir() {
-			names = append(names, it.Name())
+		if !it.IsDir() {
+			continue
 		}
+		name, slot := SplitKey(it.Name())
+		refs = append(refs, Ref{Name: name, Slot: slot})
 	}
-	sort.Strings(names)
-	return names, nil
+	sort.Slice(refs, func(i, j int) bool { return SlotKey(refs[i].Name, refs[i].Slot) < SlotKey(refs[j].Name, refs[j].Slot) })
+	return refs, nil
 }
 
-// Get loads the record for name.
-func (db DB) Get(name string) (*Rec, error) {
-	dir := db.recDir(name)
+// SplitKey parses a DB directory key back into name and slot.
+func SplitKey(key string) (string, string) {
+	if i := strings.LastIndex(key, "@"); i > 0 {
+		return key[:i], key[i+1:]
+	}
+	return key, "0"
+}
+
+// Get loads the record for a name/slot pair. A slot of "" means "0".
+func (db DB) Get(name, slot string) (*Rec, error) {
+	key := SlotKey(name, slot)
+	dir := filepath.Join(db.Dir, key)
 	vb, err := os.ReadFile(filepath.Join(dir, "version"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -87,7 +123,7 @@ func (db DB) Get(name string) (*Rec, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
-	rec := &Rec{Name: name, Version: strings.TrimSpace(string(vb)), Entries: entries}
+	rec := &Rec{Name: name, Slot: slot, Version: strings.TrimSpace(string(vb)), Entries: entries}
 	if mb, err := os.ReadFile(filepath.Join(dir, "meta.json")); err == nil {
 		var m Meta
 		if err := json.Unmarshal(mb, &m); err == nil {
@@ -102,30 +138,53 @@ func (db DB) Get(name string) (*Rec, error) {
 	return rec, nil
 }
 
-// Owner returns the name of the installed package owning path, or "" when
-// the path is not owned by anyone.
-func (db DB) Owner(path string) (string, error) {
-	names, err := db.List()
+// GetAll returns every slot installed for name, sorted by slot key.
+func (db DB) GetAll(name string) ([]*Rec, error) {
+	refs, err := db.List()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	for _, n := range names {
-		rec, err := db.Get(n)
+	var out []*Rec
+	for _, ref := range refs {
+		if ref.Name != name {
+			continue
+		}
+		rec, err := db.Get(ref.Name, ref.Slot)
 		if err != nil {
-			return "", err
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	return out, nil
+}
+
+// Owner returns the installed package owning path as a Ref, or a zero Ref
+// when the path is not owned by anyone.
+func (db DB) Owner(path string) (Ref, error) {
+	refs, err := db.List()
+	if err != nil {
+		return Ref{}, err
+	}
+	for _, ref := range refs {
+		rec, err := db.Get(ref.Name, ref.Slot)
+		if err != nil {
+			return Ref{}, err
 		}
 		for _, e := range rec.Entries {
 			if e.Path == path {
-				return n, nil
+				return ref, nil
 			}
 		}
 	}
-	return "", nil
+	return Ref{}, nil
 }
 
 // Save writes a record atomically.
 func (db DB) Save(rec *Rec) error {
-	dir := db.recDir(rec.Name)
+	if rec.Slot == "" {
+		rec.Slot = "0"
+	}
+	dir := db.recDir(rec.Name, rec.Slot)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -161,9 +220,9 @@ func (db DB) Save(rec *Rec) error {
 	return nil
 }
 
-// Delete removes the record of name.
-func (db DB) Delete(name string) error {
-	return os.RemoveAll(db.recDir(name))
+// Delete removes the record of a name/slot pair.
+func (db DB) Delete(name, slot string) error {
+	return os.RemoveAll(db.recDir(name, slot))
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {

@@ -24,7 +24,8 @@ func Apply(rec *pkgdb.Rec, destroot, root string, db pkgdb.DB) error {
 		fmt.Fprintln(os.Stderr, "zpkg:", msg)
 	}
 
-	// Reject any file already owned by a different installed package.
+	// Reject any file owned by another package or another slot of the same
+	// package (slots must not overlap files; same name+slot is an upgrade).
 	for _, e := range rec.Entries {
 		if e.Kind == "dir" || manifest.Ignored(e.Path) {
 			continue
@@ -33,13 +34,13 @@ func Apply(rec *pkgdb.Rec, destroot, root string, db pkgdb.DB) error {
 		if err != nil {
 			return err
 		}
-		if owner != "" && owner != rec.Name {
-			return fmt.Errorf("%s: already owned by %s", e.Path, owner)
+		if owner.Name != "" && (owner.Name != rec.Name || owner.Slot != rec.Slot) {
+			return fmt.Errorf("%s: already owned by %s", e.Path, owner.String())
 		}
 	}
 
-	j := &txnJournal{Kind: "install", Name: rec.Name, Version: rec.VersionString(), Phase: phaseInstalling}
-	if _, err := db.Get(rec.Name); err == nil {
+	j := &txnJournal{Kind: "install", Name: rec.Name, Slot: rec.Slot, Version: rec.VersionString(), Phase: phaseInstalling}
+	if _, err := db.Get(rec.Name, rec.Slot); err == nil {
 		j.HadRecord = true // upgrade: keep the old record if we must roll back
 	}
 	if err := saveJournal(db, j); err != nil {
@@ -160,45 +161,48 @@ func Remove(name, root string, db pkgdb.DB) error {
 		fmt.Fprintln(os.Stderr, "zpkg:", msg)
 	}
 
-	rec, err := db.Get(name)
+	// Every slot of the package is removed; the files of one slot cannot
+	// overlap another (the conflict rule), so removal is independent.
+	recs, err := db.GetAll(name)
 	if err != nil {
 		return err
 	}
-	if err := checkIntegrity(rec, root); err != nil {
-		return err
-	}
-
-	var files []string
-	for _, e := range rec.Entries {
-		if e.Kind != "dir" {
-			files = append(files, e.Path)
-		}
-	}
-	j := &txnJournal{Kind: "remove", Name: rec.Name, Version: rec.VersionString(), Phase: phaseRemoving, Files: files}
-	if err := saveJournal(db, j); err != nil {
-		return err
-	}
-
-	// Files and links first (entries are sorted by path, so reverse iteration
-	// is deepest first), then prune now-empty directories.
-	for i := len(rec.Entries) - 1; i >= 0; i-- {
-		e := rec.Entries[i]
-		if e.Kind == "dir" {
-			continue
-		}
-		if err := os.RemoveAll(filepath.Join(root, filepath.FromSlash(e.Path))); err != nil {
+	for _, rec := range recs {
+		if err := checkIntegrity(rec, root); err != nil {
 			return err
 		}
-	}
-	for i := len(rec.Entries) - 1; i >= 0; i-- {
-		e := rec.Entries[i]
-		if e.Kind != "dir" {
-			continue
+		var files []string
+		for _, e := range rec.Entries {
+			if e.Kind != "dir" {
+				files = append(files, e.Path)
+			}
 		}
-		os.Remove(filepath.Join(root, filepath.FromSlash(e.Path))) // best effort: only prunes empty dirs
-	}
-	if err := db.Delete(name); err != nil {
-		return err
+		j := &txnJournal{Kind: "remove", Name: rec.Name, Slot: rec.Slot, Version: rec.VersionString(), Phase: phaseRemoving, Files: files}
+		if err := saveJournal(db, j); err != nil {
+			return err
+		}
+
+		// Files and links first (entries are sorted by path, so reverse
+		// iteration is deepest first), then prune now-empty directories.
+		for i := len(rec.Entries) - 1; i >= 0; i-- {
+			e := rec.Entries[i]
+			if e.Kind == "dir" {
+				continue
+			}
+			if err := os.RemoveAll(filepath.Join(root, filepath.FromSlash(e.Path))); err != nil {
+				return err
+			}
+		}
+		for i := len(rec.Entries) - 1; i >= 0; i-- {
+			e := rec.Entries[i]
+			if e.Kind != "dir" {
+				continue
+			}
+			os.Remove(filepath.Join(root, filepath.FromSlash(e.Path))) // best effort: only prunes empty dirs
+		}
+		if err := db.Delete(rec.Name, rec.Slot); err != nil {
+			return err
+		}
 	}
 	return os.RemoveAll(txnDir(db))
 }

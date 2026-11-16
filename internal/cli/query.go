@@ -17,16 +17,16 @@ func cmdList() error {
 		return err
 	}
 	db := pkgdb.DB{Dir: cfg.DB}
-	names, err := db.List()
+	refs, err := db.List()
 	if err != nil {
 		return err
 	}
-	for _, n := range names {
-		rec, err := db.Get(n)
+	for _, ref := range refs {
+		rec, err := db.Get(ref.Name, ref.Slot)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("%s %s\n", rec.Name, rec.VersionString())
+		fmt.Printf("%s %s\n", ref.String(), rec.VersionString())
 	}
 	return nil
 }
@@ -67,25 +67,27 @@ func cmdInfo(names []string) error {
 	}
 	db := pkgdb.DB{Dir: cfg.DB}
 	for _, name := range names {
-		rec, gerr := db.Get(name)
+		recs, gerr := db.GetAll(name)
 		fmt.Println(name + ":")
 		if gerr == nil {
-			line := fmt.Sprintf("  installed: %s", rec.VersionString())
-			if rec.Meta != nil {
-				if rec.Meta.Slot != "" {
-					line += fmt.Sprintf(" (slot %s", rec.Meta.Slot)
-					if rec.Meta.Repo != "" {
-						line += ", repo " + filepath.Base(rec.Meta.Repo)
+			for _, rec := range recs {
+				line := fmt.Sprintf("  installed: %s", rec.VersionString())
+				if rec.Meta != nil {
+					if rec.Meta.Slot != "" {
+						line += fmt.Sprintf(" (slot %s", rec.Meta.Slot)
+						if rec.Meta.Repo != "" {
+							line += ", repo " + filepath.Base(rec.Meta.Repo)
+						}
+						if rec.Meta.Installed != "" {
+							line += ", " + rec.Meta.Installed
+						}
+						line += ")"
 					}
-					if rec.Meta.Installed != "" {
-						line += ", " + rec.Meta.Installed
-					}
-					line += ")"
 				}
-			}
-			fmt.Println(line)
-			if rec.Meta != nil && len(rec.Meta.UseFlags) > 0 {
-				fmt.Printf("  useflags: %s\n", joinDeps(rec.Meta.UseFlags))
+				fmt.Println(line)
+				if rec.Meta != nil && len(rec.Meta.UseFlags) > 0 {
+					fmt.Printf("  useflags: %s\n", joinDeps(rec.Meta.UseFlags))
+				}
 			}
 		} else {
 			fmt.Println("  installed: -")
@@ -130,11 +132,11 @@ func cmdOwner(paths []string) error {
 		if err != nil {
 			return err
 		}
-		if owner == "" {
+		if owner.Name == "" {
 			fmt.Printf("%s: no owner\n", p)
 			continue
 		}
-		fmt.Printf("%s: %s\n", p, owner)
+		fmt.Printf("%s: %s\n", p, owner.String())
 	}
 	return nil
 }

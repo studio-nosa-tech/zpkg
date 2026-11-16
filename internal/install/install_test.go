@@ -1,11 +1,14 @@
 package install
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
+	"github.com/studio-nosa-tech/zpkg/internal/hash"
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
 	"github.com/studio-nosa-tech/zpkg/internal/pkgdb"
 )
@@ -56,7 +59,7 @@ func TestApplyCommit(t *testing.T) {
 	if got := readTree(t, root, "usr/bin/tool"); got != "NEW" {
 		t.Errorf("tool = %q", got)
 	}
-	if _, err := db.Get("tool"); err != nil {
+	if _, err := db.Get("tool", "0"); err != nil {
 		t.Errorf("db record missing: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(db.Dir, ".txn")); !os.IsNotExist(err) {
@@ -88,7 +91,7 @@ func TestApplyRollbackOnFailure(t *testing.T) {
 	if got := readTree(t, root, "usr/bin/tool"); got != "OLD" {
 		t.Errorf("after failure tool = %q, want the original OLD", got)
 	}
-	if _, err := db.Get("tool"); err == nil {
+	if _, err := db.Get("tool", "0"); err == nil {
 		t.Error("partial db record must not exist")
 	}
 	if _, err := os.Stat(filepath.Join(db.Dir, ".txn")); !os.IsNotExist(err) {
@@ -132,7 +135,7 @@ func TestApplyRollbackKeepsOldRecordOnUpgrade(t *testing.T) {
 	if got := readTree(t, root, "usr/bin/tool"); got != "OLD" {
 		t.Errorf("after failed upgrade tool = %q, want OLD", got)
 	}
-	got, err := db.Get("tool")
+	got, err := db.Get("tool", "0")
 	if err != nil {
 		t.Fatal("the old record must survive the failed upgrade:", err)
 	}
@@ -188,10 +191,71 @@ func TestRecoverCompletesInterruptedRemove(t *testing.T) {
 			t.Errorf("%s still present after recovery", rel)
 		}
 	}
-	if _, err := db.Get("gone"); err == nil {
+	if _, err := db.Get("gone", "0"); err == nil {
 		t.Error("db record must be gone after completing the removal")
 	}
 	if _, err := os.Stat(filepath.Join(db.Dir, ".txn")); !os.IsNotExist(err) {
 		t.Errorf("txn dir still present: %v", err)
+	}
+}
+
+func TestSlotCoexistenceAndConflict(t *testing.T) {
+	root := t.TempDir()
+	db := pkgdb.DB{Dir: filepath.Join(root, "var/lib/zpkg")}
+
+	// Slot 0 installs usr/lib/multi/v1.so, slot 1 installs usr/lib/multi/v2.so:
+	// the two records coexist because their files do not overlap.
+	packSlot := func(version, slot, rel string, destroot, content string) *pkgdb.Rec {
+		writeTree(t, destroot, map[string]string{rel: content})
+		sum, err := hash.File(filepath.Join(destroot, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &pkgdb.Rec{
+			Name:    "multi",
+			Slot:    slot,
+			Version: version,
+			Entries: []manifest.Entry{{Kind: "file", Path: rel, Hash: sum}},
+			Meta:    &pkgdb.Meta{Slot: slot},
+		}
+	}
+	dest := t.TempDir()
+	rec0 := packSlot("1.0", "0", "usr/lib/multi/v1.so", dest, "V1")
+	if err := Apply(rec0, dest, root, db); err != nil {
+		t.Fatal(err)
+	}
+	dest = t.TempDir()
+	rec1 := packSlot("2.0", "1", "usr/lib/multi/v2.so", dest, "V2")
+	if err := Apply(rec1, dest, root, db); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTree(t, root, "usr/lib/multi/v1.so"); got != "V1" {
+		t.Errorf("slot 0 file = %q", got)
+	}
+	if got := readTree(t, root, "usr/lib/multi/v2.so"); got != "V2" {
+		t.Errorf("slot 1 file = %q", got)
+	}
+
+	// A third slot trying to write a file owned by slot 0 conflicts.
+	dest = t.TempDir()
+	rec2 := packSlot("3.0", "2", "usr/lib/multi/v1.so", dest, "V3")
+	if err := Apply(rec2, dest, root, db); err == nil {
+		t.Fatal("cross-slot file overlap must be rejected")
+	} else if !strings.Contains(fmt.Sprint(err), "already owned") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Remove removes every slot.
+	if err := Remove("multi", root, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Get("multi", "0"); err == nil {
+		t.Error("slot 0 record still present after Remove")
+	}
+	if _, err := db.Get("multi", "1"); err == nil {
+		t.Error("slot 1 record still present after Remove")
+	}
+	if _, err := os.Stat(filepath.Join(root, "usr/lib/multi/v1.so")); !os.IsNotExist(err) {
+		t.Error("slot 0 file still present after Remove")
 	}
 }

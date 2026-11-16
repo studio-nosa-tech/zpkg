@@ -23,6 +23,7 @@ const (
 type txnJournal struct {
 	Kind      string   `json:"kind"` // "install" | "remove"
 	Name      string   `json:"name"`
+	Slot      string   `json:"slot,omitempty"`
 	Version   string   `json:"version"`
 	Phase     string   `json:"phase"`
 	HadRecord bool     `json:"hadrecord"` // a record of Name existed before the install (upgrade)
@@ -80,12 +81,12 @@ func Recover(root string, db pkgdb.DB) (string, error) {
 		if err := rollbackInstall(root, db, &j); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("rolled back the interrupted install of %s %s", j.Name, j.Version), nil
+		return fmt.Sprintf("rolled back the interrupted install of %s %s", SlotName(j.Name, j.Slot), j.Version), nil
 	case "remove":
 		if err := completeRemove(root, db, &j); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("completed the interrupted removal of %s %s", j.Name, j.Version), nil
+		return fmt.Sprintf("completed the interrupted removal of %s %s", SlotName(j.Name, j.Slot), j.Version), nil
 	default:
 		os.RemoveAll(txnDir(db))
 		return "cleared an unknown transaction journal", nil
@@ -114,7 +115,7 @@ func rollbackInstall(root string, db pkgdb.DB, j *txnJournal) error {
 	// old record is untouched and matches the restored (old) files, so it
 	// stays.
 	if !j.HadRecord {
-		if err := db.Delete(j.Name); err != nil {
+		if err := db.Delete(j.Name, j.Slot); err != nil {
 			return err
 		}
 	}
@@ -125,10 +126,18 @@ func completeRemove(root string, db pkgdb.DB, j *txnJournal) error {
 	for _, p := range j.Files {
 		os.RemoveAll(filepath.Join(root, filepath.FromSlash(p)))
 	}
-	if err := db.Delete(j.Name); err != nil {
+	if err := db.Delete(j.Name, j.Slot); err != nil {
 		return err
 	}
 	return os.RemoveAll(txnDir(db))
+}
+
+// SlotName renders name or name@slot for messages.
+func SlotName(name, slot string) string {
+	if slot == "" || slot == "0" {
+		return name
+	}
+	return name + "@" + slot
 }
 
 func writeAtomic(path string, data []byte) error {

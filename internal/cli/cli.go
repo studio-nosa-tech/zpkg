@@ -25,7 +25,8 @@ Usage:
                               upgrade world (or the named packages) to the
                               recipe versions; --newuse also rebuilds a
                               package whose effective USE flags changed
-  zpkg remove <pkg>...        remove installed packages (and world entries)
+  zpkg remove <pkg>...        remove installed packages (all slots) and
+                              their world entries
   zpkg list                   list installed packages
   zpkg info <pkg>...          installed metadata and the available recipe
   zpkg owner <path>...        which package owns a path

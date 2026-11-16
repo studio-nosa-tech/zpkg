@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/studio-nosa-tech/zpkg/internal/config"
+	"github.com/studio-nosa-tech/zpkg/internal/install"
 	"github.com/studio-nosa-tech/zpkg/internal/pkgdb"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 	"github.com/studio-nosa-tech/zpkg/internal/version"
@@ -42,9 +43,11 @@ func cmdUpgrade(targets []string, o installOptions) error {
 			fmt.Printf("%s: %v\n", name, err)
 			continue
 		}
-		rec, err := db.Get(name)
+		// Upgrades target the recipe's slot; other slots of the same
+		// name stay installed.
+		rec, err := db.Get(name, r.Slot)
 		if err != nil {
-			fmt.Printf("%s: not installed (use zpkg install)\n", name)
+			fmt.Printf("%s: not installed in slot %s (use zpkg install)\n", name, r.Slot)
 			continue
 		}
 		behind := version.Compare(rec.VersionString(), r.FullVersion()) < 0
@@ -107,11 +110,15 @@ func cmdWorld() error {
 		return err
 	}
 	for _, n := range names {
-		if rec, err := db.Get(n); err == nil {
-			fmt.Printf("%s %s\n", n, rec.VersionString())
+		// The world set is plain names; show every slot installed for it.
+		recs, err := db.GetAll(n)
+		if err != nil || len(recs) == 0 {
+			fmt.Printf("%s (not installed)\n", n)
 			continue
 		}
-		fmt.Printf("%s (not installed)\n", n)
+		for _, rec := range recs {
+			fmt.Printf("%s %s\n", install.SlotName(n, rec.Slot), rec.VersionString())
+		}
 	}
 	return nil
 }

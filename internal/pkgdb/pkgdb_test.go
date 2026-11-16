@@ -36,7 +36,7 @@ func TestSaveGetRoundtrip(t *testing.T) {
 		t.Fatalf("version file = %q", got)
 	}
 
-	got, err := db.Get("vim")
+	got, err := db.Get("vim", "0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestGetV1Record(t *testing.T) {
 	if err := manifest.Write(filepath.Join(dir, "manifest"), nil); err != nil {
 		t.Fatal(err)
 	}
-	rec, err := db.Get("old")
+	rec, err := db.Get("old", "0")
 	if err != nil {
 		t.Fatal(err)
 	}

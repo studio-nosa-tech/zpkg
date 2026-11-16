@@ -50,13 +50,13 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		return err
 	}
 	db := pkgdb.DB{Dir: cfg.DB}
-	installed := map[string]bool{}
-	names, err := db.List()
+	installed := map[string]bool{} // keyed by name@slot
+	refs, err := db.List()
 	if err != nil {
 		return err
 	}
-	for _, n := range names {
-		installed[n] = true
+	for _, ref := range refs {
+		installed[pkgdb.SlotKey(ref.Name, ref.Slot)] = true
 	}
 
 	order, err := resolve(cfg, targets)
@@ -64,18 +64,20 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		return err
 	}
 	for _, name := range order {
-		// With force every named target is rebuilt and reinstalled;
-		// dependencies that are already present are still skipped so
-		// only the requested packages are replaced.
-		skip := installed[name] && !(o.force && contains(targets, name))
+		r, err := recipe.Load(cfg.Repos, name)
+		if err != nil {
+			return err
+		}
+		// A record exists for this name AND slot: it is an upgrade. Other
+		// slots of the same name stay installed (that is the point of
+		// slots). With force every named target is rebuilt and
+		// reinstalled; dependencies that are already present are still
+		// skipped so only the requested packages are replaced.
+		skip := installed[pkgdb.SlotKey(name, r.Slot)] && !(o.force && contains(targets, name))
 		if o.pretend {
 			if skip {
 				fmt.Printf("skipping %s (already installed)\n", name)
 				continue
-			}
-			r, err := recipe.Load(cfg.Repos, name)
-			if err != nil {
-				return err
 			}
 			if doInstall {
 				fmt.Printf("would install %s %s\n", r.Name, r.FullVersion())
@@ -87,10 +89,6 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		if skip {
 			fmt.Printf("skipping %s (already installed)\n", name)
 			continue
-		}
-		r, err := recipe.Load(cfg.Repos, name)
-		if err != nil {
-			return err
 		}
 		opts := cfg.Options.ForPackage(r.Name)
 		res := build.LoadBinpkg(r, cfg)
