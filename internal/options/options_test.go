@@ -104,3 +104,57 @@ func TestSaveRoundtrip(t *testing.T) {
 		t.Fatalf("Use = %v, want %v", o.Use, want)
 	}
 }
+
+func TestPackageUse(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "etc/zpkg/use.conf"), "global\n")
+	writeFile(t, filepath.Join(root, "etc/zpkg/package.use"), "vim -global gtk\ngit curl\n")
+
+	o, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vim := o.ForPackage("vim")
+	if vim.Enabled("global") {
+		t.Error("package.use should disable the global flag for vim")
+	}
+	if !vim.Enabled("gtk") {
+		t.Error("package.use should enable gtk for vim")
+	}
+	if o.ForPackage("git").Enabled("global") != true {
+		t.Error("other packages keep the global flag")
+	}
+	if o.Hash() == vim.Hash() {
+		t.Error("effective options differ, hash must differ")
+	}
+	if !o.ForPackage("other").Enabled("global") {
+		t.Error("ForPackage without tokens must return the global set")
+	}
+}
+
+func TestSavePackageUse(t *testing.T) {
+	root := t.TempDir()
+	if err := SavePackageUse(root, "vim", []string{"-X", "gtk"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePackageUse(root, "git", []string{"curl"}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := o.PackageTokens("vim"); len(got) != 2 || got[0] != "-X" || got[1] != "gtk" {
+		t.Errorf("vim tokens = %v", got)
+	}
+	if !o.ForPackage("git").Enabled("curl") {
+		t.Error("git curl flag missing")
+	}
+	if err := SavePackageUse(root, "vim", nil); err != nil {
+		t.Fatal(err)
+	}
+	o, _ = Load(root)
+	if len(o.PackageTokens("vim")) != 0 {
+		t.Error("vim line should be removed")
+	}
+}

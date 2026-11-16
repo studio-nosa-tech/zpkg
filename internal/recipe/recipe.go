@@ -22,6 +22,7 @@ type Recipe struct {
 	Version     string
 	Revision    int      // recipe revision (-rN), 0 when unset
 	Slot        string   // slot ("0" when unset)
+	IUse        []string // USE flags this recipe understands
 	Provides    []string // virtual packages this recipe satisfies
 	Conflicts   []string // packages that must not be installed alongside
 	Sources     []string
@@ -97,6 +98,9 @@ func load(dir, name string) (*Recipe, error) {
 		return nil, err
 	}
 	if r.MakeDepends, err = readLines(filepath.Join(dir, "makedepends"), true); err != nil {
+		return nil, err
+	}
+	if r.IUse, err = readLines(filepath.Join(dir, "iuse"), true); err != nil {
 		return nil, err
 	}
 	if r.Provides, err = readLines(filepath.Join(dir, "provides"), true); err != nil {

@@ -149,7 +149,7 @@ func LoadBinpkg(r *recipe.Recipe, cfg config.Config) *Result {
 		return nil
 	}
 	dir := filepath.Join(cfg.Cache, "binpkgs")
-	base := pkgBase(r, cfg.Options.Hash())
+	base := pkgBase(r, cfg.Options.ForPackage(r.Name).Hash())
 	entries, err := manifest.Read(filepath.Join(dir, base+".manifest"))
 	if err != nil {
 		return nil
@@ -214,6 +214,7 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 		}
 	}
 
+	opts := cfg.Options.ForPackage(r.Name)
 	cmd := exec.Command("bash", r.Build)
 	cmd.Dir = src
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
@@ -226,9 +227,9 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 		"ZPKG_DESTROOT="+destroot,
 		"ZPKG_SRC="+src,
 		"ZPKG_WORKDIR="+work,
-		"ZPKG_USE="+strings.Join(cfg.Options.Use, " "),
-		"ZPKG_CFLAGS="+cfg.Options.CFlags,
-		"ZPKG_MAKEOPTS="+cfg.Options.MakeOpts,
+		"ZPKG_USE="+strings.Join(opts.Use, " "),
+		"ZPKG_CFLAGS="+opts.CFlags,
+		"ZPKG_MAKEOPTS="+opts.MakeOpts,
 	)
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%s: build script failed: %w", r.Name, err)

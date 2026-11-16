@@ -30,6 +30,8 @@ Usage:
   zpkg world                  packages installed explicitly
   zpkg search <term>          search recipe repos
   zpkg use [flag | -flag]...  show or edit /etc/zpkg/use.conf (USE flags)
+  zpkg use --package <pkg> [flag | -flag]...
+                              show or edit the package's line in package.use
 
 Environment:
   ZPKG_REPOS   recipe repo directories, separated by the OS path list
@@ -152,16 +154,41 @@ func recipeDeps(r *recipe.Recipe) []string {
 	return deps
 }
 
-// resolve returns targets with dependencies in build order.
+// resolve returns targets with dependencies in build order. Conditional
+// dependencies are expanded with the options that apply to each package,
+// and recipes that declare IUSE are checked for typos in flag names.
 func resolve(cfg config.Config, targets []string) ([]string, error) {
 	load := func(name string) ([]string, error) {
 		r, err := recipe.Load(cfg.Repos, name)
 		if err != nil {
 			return nil, err
 		}
-		return cfg.Options.Expand(recipeDeps(r)), nil
+		deps := recipeDeps(r)
+		if err := validateConditionalDeps(r, deps); err != nil {
+			return nil, err
+		}
+		return cfg.Options.ForPackage(name).Expand(deps), nil
 	}
 	return dep.Order(targets, load)
+}
+
+// validateConditionalDeps rejects "flag?pkg" entries whose flag is not
+// declared in the recipe's iuse file (when one exists).
+func validateConditionalDeps(r *recipe.Recipe, deps []string) error {
+	if len(r.IUse) == 0 {
+		return nil
+	}
+	for _, d := range deps {
+		i := strings.IndexByte(d, '?')
+		if i < 0 {
+			continue
+		}
+		flag := d[:i]
+		if !contains(r.IUse, flag) {
+			return fmt.Errorf("%s: conditional dependency uses flag %q, which is not in iuse", r.Name, flag)
+		}
+	}
+	return nil
 }
 
 func cmdDepends(targets []string) error {

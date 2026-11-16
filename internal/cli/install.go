@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/studio-nosa-tech/zpkg/internal/build"
@@ -88,6 +92,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		if err != nil {
 			return err
 		}
+		opts := cfg.Options.ForPackage(r.Name)
 		res := build.LoadBinpkg(r, cfg)
 		if res != nil {
 			fmt.Printf("installed from binpkg %s %s (%d files)\n", r.Name, r.FullVersion(), len(res.Entries))
@@ -97,7 +102,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 				return err
 			}
 			fmt.Printf("built %s %s (%d files)\n", r.Name, r.FullVersion(), len(res.Entries))
-			if pkgPath, err := build.PackBinpkg(r, res, cfg.Cache, cfg.Options.Hash()); err != nil {
+			if pkgPath, err := build.PackBinpkg(r, res, cfg.Cache, opts.Hash()); err != nil {
 				fmt.Fprintln(os.Stderr, "zpkg: binpkg pack failed:", err)
 			} else {
 				fmt.Printf("binpkg: %s\n", pkgPath)
@@ -112,7 +117,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 			Version:  r.Version,
 			Revision: r.Revision,
 			Entries:  res.Entries,
-			Meta:     metaFromRecipe(r, cfg.Options.Use),
+			Meta:     metaFromRecipe(r, opts.Use),
 		}
 		if err := install.Apply(rec, res.Destroot, cfg.Root, db); err != nil {
 			return err
@@ -124,6 +129,10 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 				return err
 			}
 		}
+		if err := runHook(cfg, r, "post_install"); err != nil {
+			return err
+		}
+		refreshLdconfig(cfg)
 		fmt.Printf("installed %s %s\n", r.Name, r.FullVersion())
 	}
 	return nil
@@ -136,13 +145,91 @@ func cmdRemove(names []string) error {
 	}
 	db := pkgdb.DB{Dir: cfg.DB}
 	for _, name := range names {
+		// The recipe may be gone from the tree; hooks are best-effort.
+		r, _ := recipe.Load(cfg.Repos, name)
 		if err := install.Remove(name, cfg.Root, db); err != nil {
 			return err
 		}
 		if err := world.Remove(cfg.DB, name); err != nil {
 			return err
 		}
+		if r != nil {
+			if err := runHook(cfg, r, "post_remove"); err != nil {
+				return err
+			}
+		}
+		refreshLdconfig(cfg)
 		fmt.Printf("removed %s\n", name)
 	}
 	return nil
+}
+
+// runHook executes a recipe hook (<recipe>/post_install, post_remove) with
+// the package environment. When the target root is runnable we chroot into
+// it (so /etc paths mean the target); a live root runs the hook directly,
+// and a bare test/seed root runs it on the host with ZPKG_ROOT set.
+func runHook(cfg config.Config, r *recipe.Recipe, hook string) error {
+	scriptPath := filepath.Join(r.Dir, hook)
+	script, err := os.ReadFile(scriptPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	env := []string{
+		"ZPKG_NAME=" + r.Name,
+		"ZPKG_VERSION=" + r.FullVersion(),
+		"ZPKG_ROOT=" + cfg.Root,
+		"ZPKG_USE=" + strings.Join(cfg.Options.ForPackage(r.Name).Use, " "),
+	}
+
+	var cmd *exec.Cmd
+	switch {
+	case cfg.Root == "/":
+		args := append([]string{"/usr/bin/env"}, env...)
+		args = append(args, "/usr/bin/bash", "-s")
+		cmd = exec.Command(args[0], args[1:]...)
+	case fileExists(filepath.Join(cfg.Root, "usr", "bin", "bash")):
+		args := append([]string{cfg.Root, "/usr/bin/env"}, env...)
+		args = append(args, "/usr/bin/bash", "-s")
+		cmd = exec.Command("chroot", args...)
+	default:
+		args := append([]string{"env"}, env...)
+		args = append(args, "bash", "-s")
+		cmd = exec.Command(args[0], args[1:]...)
+	}
+	cmd.Stdin = bytes.NewReader(script)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s: %s hook failed: %w (the package is already installed)", r.Name, hook, err)
+	}
+	return nil
+}
+
+// refreshLdconfig updates the shared library cache after install/remove.
+// It is best-effort: a cross-build root without a runnable loader is skipped.
+func refreshLdconfig(cfg config.Config) {
+	lc := filepath.Join(cfg.Root, "usr", "sbin", "ldconfig")
+	if !fileExists(lc) {
+		return
+	}
+	var cmd *exec.Cmd
+	switch {
+	case cfg.Root == "/":
+		cmd = exec.Command("/usr/sbin/ldconfig")
+	case fileExists(filepath.Join(cfg.Root, "usr", "bin", "bash")):
+		cmd = exec.Command("chroot", cfg.Root, "/usr/sbin/ldconfig")
+	default:
+		return
+	}
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "zpkg: ldconfig failed: %v\n", err)
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

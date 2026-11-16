@@ -27,6 +27,9 @@ func TestLoadOptionalMetadata(t *testing.T) {
 	if want := []string{"libfoo.so", "virtual-dev"}; !reflect.DeepEqual(r.Provides, want) {
 		t.Errorf("provides = %v, want %v", r.Provides, want)
 	}
+	if want := []string{"demo", "ssl"}; !reflect.DeepEqual(r.IUse, want) {
+		t.Errorf("iuse = %v, want %v", r.IUse, want)
+	}
 	if want := []string{"foo-compat"}; !reflect.DeepEqual(r.Conflicts, want) {
 		t.Errorf("conflicts = %v, want %v", r.Conflicts, want)
 	}
