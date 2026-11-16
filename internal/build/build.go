@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/studio-nosa-tech/zpkg/internal/config"
@@ -16,6 +17,17 @@ import (
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 	"github.com/studio-nosa-tech/zpkg/internal/source"
 )
+
+// pkgBase is the cache key for a recipe: name-version, plus -rN when the
+// recipe has a revision. Baking the revision in keeps old and new builds
+// from being confused.
+func pkgBase(r *recipe.Recipe) string {
+	base := r.Name + "-" + r.Version
+	if r.Revision > 0 {
+		base += "-r" + strconv.Itoa(r.Revision)
+	}
+	return base
+}
 
 // Result describes one completed build.
 type Result struct {
@@ -61,7 +73,7 @@ func PackBinpkg(r *recipe.Recipe, res *Result, cacheDir string) (string, error) 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	base := r.Name + "-" + r.Version
+	base := pkgBase(r)
 	pkgPath := filepath.Join(dir, base+".pkg.tar.gz")
 
 	f, err := os.Create(pkgPath)
@@ -134,7 +146,7 @@ func LoadBinpkg(r *recipe.Recipe, cfg config.Config) *Result {
 		return nil
 	}
 	dir := filepath.Join(cfg.Cache, "binpkgs")
-	base := r.Name + "-" + r.Version
+	base := pkgBase(r)
 	entries, err := manifest.Read(filepath.Join(dir, base+".manifest"))
 	if err != nil {
 		return nil

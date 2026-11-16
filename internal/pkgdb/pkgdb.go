@@ -2,6 +2,7 @@
 package pkgdb
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,17 +10,45 @@ import (
 	"strings"
 
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
+	"github.com/studio-nosa-tech/zpkg/internal/version"
 )
+
+// Schema is the current metadata schema version. Records without a
+// meta.json are v1 (name + version + manifest only) and remain readable.
+const Schema = 2
 
 // DB is the installed package database rooted at a directory.
 type DB struct{ Dir string }
 
+// Meta is the package metadata stored next to the manifest. It exists so
+// that upgrades, slots, USE flags and build provenance can be answered
+// without rebuilding the recipe world.
+type Meta struct {
+	Schema    int      `json:"schema"`
+	Name      string   `json:"name"`
+	Version   string   `json:"version"`
+	Revision  int      `json:"revision"`
+	Slot      string   `json:"slot,omitempty"`
+	Repo      string   `json:"repo,omitempty"`
+	Arch      string   `json:"arch,omitempty"`
+	Installed string   `json:"installed,omitempty"` // RFC3339, UTC
+	UseFlags  []string `json:"useflags,omitempty"`
+	Depends   []string `json:"depends,omitempty"`      // runtime dependencies
+	BuildDeps []string `json:"builddepends,omitempty"` // build-only dependencies
+	BuildID   string   `json:"buildid,omitempty"`
+}
+
 // Rec is one installed package record.
 type Rec struct {
-	Name    string
-	Version string
-	Entries []manifest.Entry
+	Name     string
+	Version  string
+	Revision int
+	Entries  []manifest.Entry
+	Meta     *Meta // nil for records written by zpkg v1
 }
+
+// VersionString is the canonical "pkgver-rN" form.
+func (r *Rec) VersionString() string { return version.String(r.Version, r.Revision) }
 
 func (db DB) recDir(name string) string {
 	return filepath.Join(db.Dir, name)
@@ -58,7 +87,19 @@ func (db DB) Get(name string) (*Rec, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
-	return &Rec{Name: name, Version: strings.TrimSpace(string(vb)), Entries: entries}, nil
+	rec := &Rec{Name: name, Version: strings.TrimSpace(string(vb)), Entries: entries}
+	if mb, err := os.ReadFile(filepath.Join(dir, "meta.json")); err == nil {
+		var m Meta
+		if err := json.Unmarshal(mb, &m); err == nil {
+			rec.Version = m.Version
+			rec.Revision = m.Revision
+			rec.Meta = &m
+			return rec, nil
+		}
+	}
+	// v1 record: the version file may already include the revision.
+	rec.Version, rec.Revision = version.Parse(rec.Version)
+	return rec, nil
 }
 
 // Owner returns the name of the installed package owning path, or "" when
@@ -82,13 +123,32 @@ func (db DB) Owner(path string) (string, error) {
 	return "", nil
 }
 
-// Save writes a record.
+// Save writes a record atomically.
 func (db DB) Save(rec *Rec) error {
 	dir := db.recDir(rec.Name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "version"), []byte(rec.Version+"\n"), 0o644); err != nil {
+	// The plain version file stays for compatibility with zpkg v1.
+	if err := writeFileAtomic(filepath.Join(dir, "version"), []byte(rec.VersionString()+"\n"), 0o644); err != nil {
+		return err
+	}
+	m := rec.Meta
+	if m == nil {
+		m = &Meta{}
+	}
+	m.Schema = Schema
+	m.Name = rec.Name
+	m.Version = rec.Version
+	m.Revision = rec.Revision
+	if m.Slot == "" {
+		m.Slot = "0"
+	}
+	mb, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(filepath.Join(dir, "meta.json"), append(mb, '\n'), 0o644); err != nil {
 		return err
 	}
 	return manifest.Write(filepath.Join(dir, "manifest"), rec.Entries)
@@ -97,4 +157,12 @@ func (db DB) Save(rec *Rec) error {
 // Delete removes the record of name.
 func (db DB) Delete(name string) error {
 	return os.RemoveAll(db.recDir(name))
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

@@ -1,0 +1,87 @@
+package cli
+
+import (
+	"fmt"
+
+	"github.com/studio-nosa-tech/zpkg/internal/config"
+	"github.com/studio-nosa-tech/zpkg/internal/pkgdb"
+	"github.com/studio-nosa-tech/zpkg/internal/recipe"
+	"github.com/studio-nosa-tech/zpkg/internal/version"
+	"github.com/studio-nosa-tech/zpkg/internal/world"
+)
+
+// cmdUpgrade brings the world set (or the named packages) up to the
+// versions the recipe tree offers.
+func cmdUpgrade(targets []string, o installOptions) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if err := requireRepos(cfg); err != nil {
+		return err
+	}
+	db := pkgdb.DB{Dir: cfg.DB}
+
+	names := targets
+	if len(names) == 0 {
+		names, err = world.Read(cfg.DB)
+		if err != nil {
+			return err
+		}
+		if len(names) == 0 {
+			fmt.Println("world is empty; install something first")
+			return nil
+		}
+	}
+
+	var upgradable []string
+	for _, name := range names {
+		r, err := recipe.Load(cfg.Repos, name)
+		if err != nil {
+			fmt.Printf("%s: %v\n", name, err)
+			continue
+		}
+		rec, err := db.Get(name)
+		if err != nil {
+			fmt.Printf("%s: not installed (use zpkg install)\n", name)
+			continue
+		}
+		if version.Compare(rec.VersionString(), r.FullVersion()) >= 0 {
+			if len(targets) > 0 {
+				fmt.Printf("%s %s is up to date\n", name, rec.VersionString())
+			}
+			continue
+		}
+		fmt.Printf("%s: %s -> %s\n", name, rec.VersionString(), r.FullVersion())
+		upgradable = append(upgradable, name)
+	}
+	if len(upgradable) == 0 {
+		if len(targets) == 0 {
+			fmt.Println("nothing to upgrade")
+		}
+		return nil
+	}
+	o.force = true
+	return cmdBuildInstall(upgradable, true, o)
+}
+
+// cmdWorld prints the packages installed explicitly.
+func cmdWorld() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db := pkgdb.DB{Dir: cfg.DB}
+	names, err := world.Read(cfg.DB)
+	if err != nil {
+		return err
+	}
+	for _, n := range names {
+		if rec, err := db.Get(n); err == nil {
+			fmt.Printf("%s %s\n", n, rec.VersionString())
+			continue
+		}
+		fmt.Printf("%s (not installed)\n", n)
+	}
+	return nil
+}
