@@ -259,3 +259,78 @@ func TestSlotCoexistenceAndConflict(t *testing.T) {
 		t.Error("slot 0 file still present after Remove")
 	}
 }
+
+func TestUpgradePrunesDroppedFiles(t *testing.T) {
+	root := t.TempDir()
+	db := pkgdb.DB{Dir: filepath.Join(root, "var/lib/zpkg")}
+
+	// v1 ships a binary, a config file, a modified config and a runlevel
+	// symlink; v2 keeps only the binary.
+	oldFiles := map[string]string{
+		"usr/bin/tool":      "OLD",
+		"etc/tool.conf":     "drop me",
+		"etc/local.conf":    "admin edit",
+		"etc/runlevels/def": "placeholder",
+	}
+	oldDest := t.TempDir()
+	writeTree(t, oldDest, oldFiles)
+	writeTree(t, root, oldFiles)
+	sum := func(rel string) string {
+		t.Helper()
+		s, err := hash.File(filepath.Join(oldDest, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	oldEntries := []manifest.Entry{
+		{Kind: "file", Path: "etc/local.conf", Hash: sum("etc/local.conf")},
+		{Kind: "file", Path: "etc/runlevels/def", Hash: sum("etc/runlevels/def")},
+		{Kind: "file", Path: "etc/tool.conf", Hash: sum("etc/tool.conf")},
+		{Kind: "file", Path: "usr/bin/tool", Hash: sum("usr/bin/tool")},
+	}
+
+	// Symlinks need extra privileges on Windows; skip that part there.
+	linkPath := "etc/runlevels/default/tool"
+	linkChecked := false
+	if err := os.MkdirAll(filepath.Join(root, "etc/runlevels/default"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/init.d/tool", filepath.Join(root, filepath.FromSlash(linkPath))); err == nil {
+		oldEntries = append(oldEntries, manifest.Entry{Kind: "link", Link: "/etc/init.d/tool", Path: linkPath})
+		linkChecked = true
+	}
+
+	if err := db.Save(&pkgdb.Rec{Name: "tool", Slot: "0", Version: "1.0", Entries: oldEntries}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The admin edited etc/local.conf after installing v1.
+	writeTree(t, root, map[string]string{"etc/local.conf": "changed"})
+
+	newDest := t.TempDir()
+	writeTree(t, newDest, map[string]string{"usr/bin/tool": "NEW"})
+	newEntries, err := manifest.FromRoot(newDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(&pkgdb.Rec{Name: "tool", Slot: "0", Version: "2.0", Entries: newEntries}, newDest, root, db); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := readTree(t, root, "usr/bin/tool"); got != "NEW" {
+		t.Errorf("tool = %q", got)
+	}
+	dropped := []string{"etc/tool.conf", "etc/runlevels/def"}
+	if linkChecked {
+		dropped = append(dropped, linkPath)
+	}
+	for _, rel := range dropped {
+		if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Errorf("%s survived the upgrade", rel)
+		}
+	}
+	if got := readTree(t, root, "etc/local.conf"); got != "changed" {
+		t.Errorf("locally modified file = %q, want it preserved", got)
+	}
+}

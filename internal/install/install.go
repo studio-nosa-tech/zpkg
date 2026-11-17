@@ -40,7 +40,8 @@ func Apply(rec *pkgdb.Rec, destroot, root string, db pkgdb.DB) error {
 	}
 
 	j := &txnJournal{Kind: "install", Name: rec.Name, Slot: rec.Slot, Version: rec.VersionString(), Phase: phaseInstalling}
-	if _, err := db.Get(rec.Name, rec.Slot); err == nil {
+	oldRec, oldErr := db.Get(rec.Name, rec.Slot)
+	if oldErr == nil {
 		j.HadRecord = true // upgrade: keep the old record if we must roll back
 	}
 	if err := saveJournal(db, j); err != nil {
@@ -79,6 +80,14 @@ func Apply(rec *pkgdb.Rec, destroot, root string, db pkgdb.DB) error {
 				if err := applyEntry(e, destroot, root); err != nil {
 					return err
 				}
+			}
+		}
+		// An upgrade drops files the old version shipped but the new one no
+		// longer does (e.g. a runlevel symlink removed from a recipe). They
+		// are moved to the backup so a rollback restores them.
+		if oldErr == nil {
+			if err := pruneObsolete(oldRec, rec, root, backup, db, j); err != nil {
+				return err
 			}
 		}
 		j.Phase = phaseInstalled
@@ -149,6 +158,63 @@ func applyEntry(e manifest.Entry, destroot, root string) error {
 		}
 		return os.Rename(tmp, dst)
 	}
+}
+
+// pruneObsolete removes files that the previous version of a package listed
+// in its manifest but the new version does not ship. Deletion is conservative:
+// a file is only removed when it still matches the old manifest (hash for
+// files, target for symlinks), so local edits survive an upgrade. Removed
+// paths are recorded as replaced so a failed apply restores them.
+func pruneObsolete(old, rec *pkgdb.Rec, root, backup string, db pkgdb.DB, j *txnJournal) error {
+	keep := make(map[string]bool, len(rec.Entries))
+	for _, e := range rec.Entries {
+		keep[e.Path] = true
+	}
+	for _, e := range old.Entries {
+		if e.Kind == "dir" || keep[e.Path] {
+			continue
+		}
+		p := filepath.Join(root, filepath.FromSlash(e.Path))
+		info, err := os.Lstat(p)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		switch e.Kind {
+		case "link":
+			if info.Mode()&os.ModeSymlink == 0 {
+				continue
+			}
+			target, err := os.Readlink(p)
+			if err != nil || target != e.Link {
+				continue
+			}
+		case "file":
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			sum, err := hash.File(p)
+			if err != nil || sum != e.Hash {
+				continue // modified since install: leave it to the admin
+			}
+		default:
+			continue
+		}
+		bk := filepath.Join(backup, filepath.FromSlash(e.Path))
+		if err := os.MkdirAll(filepath.Dir(bk), 0o755); err != nil {
+			return err
+		}
+		if err := os.Rename(p, bk); err != nil {
+			return err
+		}
+		j.Replaced = append(j.Replaced, e.Path)
+		if err := saveJournal(db, j); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Remove deletes the files of an installed package and its record. The
