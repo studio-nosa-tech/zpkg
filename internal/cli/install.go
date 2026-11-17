@@ -63,6 +63,10 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 	if err != nil {
 		return err
 	}
+	// Load every recipe first: the "(i of n)" in the progress markers needs
+	// the list of packages that will actually be handled (skipped ones do
+	// not count).
+	var jobs []*recipe.Recipe
 	for _, name := range order {
 		r, err := recipe.Load(cfg.Repos, name)
 		if err != nil {
@@ -76,44 +80,56 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		skip := installed[pkgdb.SlotKey(name, r.Slot)] && !(o.force && contains(targets, name))
 		if o.pretend {
 			if skip {
-				fmt.Printf("skipping %s (already installed)\n", name)
+				phase("Skipping %s (already installed)", pkgLabel(r))
 				continue
 			}
 			if doInstall {
-				fmt.Printf("would install %s %s\n", r.Name, r.FullVersion())
+				phase("Would install %s", pkgLabel(r))
 			} else {
-				fmt.Printf("would build %s %s\n", r.Name, r.FullVersion())
+				phase("Would build %s", pkgLabel(r))
 			}
 			continue
 		}
 		if skip {
-			fmt.Printf("skipping %s (already installed)\n", name)
+			phase("Skipping %s (already installed)", pkgLabel(r))
 			continue
 		}
+		jobs = append(jobs, r)
+	}
+
+	for i, r := range jobs {
+		label := pkgLabel(r)
+		start := time.Now()
 		opts := cfg.Options.ForPackage(r.Name)
+
 		res := build.LoadBinpkg(r, cfg)
 		if res == nil {
 			// No local cache hit: try a configured binary package
 			// repository before falling back to a source build.
 			res = build.LoadRepoBinpkg(r, cfg)
 		}
-		if res != nil {
-			fmt.Printf("installed from binpkg %s %s (%d files)\n", r.Name, r.FullVersion(), len(res.Entries))
-		} else {
+		fromBinpkg := res != nil
+		if res == nil {
+			phase("Building %s", label)
 			res, err = build.Run(r, cfg)
 			if err != nil {
 				return err
 			}
-			fmt.Printf("built %s %s (%d files)\n", r.Name, r.FullVersion(), len(res.Entries))
+			phase("Built %s (%d files) in %s", label, len(res.Entries), elapsed(time.Since(start)))
 			if pkgPath, err := build.PackBinpkg(r, res, cfg.Cache, opts.Hash()); err != nil {
 				fmt.Fprintln(os.Stderr, "zpkg: binpkg pack failed:", err)
 			} else {
-				fmt.Printf("binpkg: %s\n", pkgPath)
+				phase("Packed binpkg %s", pkgPath)
 			}
 		}
 		if !doInstall {
-			fmt.Printf("destroot: %s\n", res.Destroot)
+			phase("Destroot %s", res.Destroot)
 			continue
+		}
+		if fromBinpkg {
+			phase("Installing (%d of %d) %s (binpkg)", i+1, len(jobs), label)
+		} else {
+			phase("Installing (%d of %d) %s", i+1, len(jobs), label)
 		}
 		rec := &pkgdb.Rec{
 			Name:     r.Name,
@@ -128,8 +144,8 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		}
 		// Only packages named on the command line become world members;
 		// dependencies are tracked but not part of the world set.
-		if contains(targets, name) && !o.asdeps {
-			if err := world.Add(cfg.DB, name); err != nil {
+		if contains(targets, r.Name) && !o.asdeps {
+			if err := world.Add(cfg.DB, r.Name); err != nil {
 				return err
 			}
 		}
@@ -137,7 +153,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 			return err
 		}
 		refreshLdconfig(cfg)
-		fmt.Printf("installed %s %s\n", r.Name, r.FullVersion())
+		phase("Installed %s", label)
 	}
 	return nil
 }
@@ -148,7 +164,8 @@ func cmdRemove(names []string) error {
 		return err
 	}
 	db := pkgdb.DB{Dir: cfg.DB}
-	for _, name := range names {
+	for i, name := range names {
+		phase("Removing (%d of %d) %s", i+1, len(names), name)
 		// The recipe may be gone from the tree; hooks are best-effort.
 		r, _ := recipe.Load(cfg.Repos, name)
 		if err := install.Remove(name, cfg.Root, db); err != nil {
@@ -163,7 +180,7 @@ func cmdRemove(names []string) error {
 			}
 		}
 		refreshLdconfig(cfg)
-		fmt.Printf("removed %s\n", name)
+		phase("Removed %s", name)
 	}
 	return nil
 }
