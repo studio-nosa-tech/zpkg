@@ -36,6 +36,13 @@ func metaFromRecipe(r *recipe.Recipe, use []string) *pkgdb.Meta {
 	}
 }
 
+// installJob is one package in the resolved install order. target marks a
+// package named on the command line (dependencies are pulled in by resolve).
+type installJob struct {
+	r      *recipe.Recipe
+	target bool
+}
+
 // cmdBuildInstall builds each package in dependency order, skipping already
 // installed ones (unless force), optionally installing as it goes.
 func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
@@ -63,10 +70,10 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 	if err != nil {
 		return err
 	}
-	// Load every recipe first: the "(i of n)" in the progress markers needs
-	// the list of packages that will actually be handled (skipped ones do
-	// not count).
-	var jobs []*recipe.Recipe
+	// Load every recipe first: the pre-build plan and the "(i of n)" in the
+	// progress markers need the list of packages that will actually be
+	// handled (skipped ones do not count).
+	var jobs []installJob
 	for _, name := range order {
 		r, err := recipe.Load(cfg.Repos, name)
 		if err != nil {
@@ -78,26 +85,39 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		// reinstalled; dependencies that are already present are still
 		// skipped so only the requested packages are replaced.
 		skip := installed[pkgdb.SlotKey(name, r.Slot)] && !(o.force && contains(targets, name))
-		if o.pretend {
-			if skip {
-				phase("Skipping %s (already installed)", pkgLabel(r))
-				continue
-			}
-			if doInstall {
-				phase("Would install %s", pkgLabel(r))
-			} else {
-				phase("Would build %s", pkgLabel(r))
-			}
-			continue
-		}
 		if skip {
 			phase("Skipping %s (already installed)", pkgLabel(r))
 			continue
 		}
-		jobs = append(jobs, r)
+		jobs = append(jobs, installJob{r: r, target: contains(targets, name)})
 	}
 
-	for i, r := range jobs {
+	if len(jobs) > 0 {
+		entries := make([]planEntry, len(jobs))
+		for i, jb := range jobs {
+			entries[i] = planEntry{
+				label:  pkgLabel(jb.r),
+				use:    useString(jb.r, cfg.Options.ForPackage(jb.r.Name).Use),
+				target: jb.target,
+			}
+		}
+		switch {
+		case o.pretend && doInstall:
+			printPlan(entries, "would be installed")
+		case o.pretend:
+			printPlan(entries, "would be built")
+		case doInstall:
+			printPlan(entries, "will be installed")
+		default:
+			printPlan(entries, "will be built")
+		}
+	}
+	if o.pretend {
+		return nil
+	}
+
+	for i, jb := range jobs {
+		r := jb.r
 		label := pkgLabel(r)
 		start := time.Now()
 		opts := cfg.Options.ForPackage(r.Name)

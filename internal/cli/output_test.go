@@ -3,6 +3,8 @@ package cli
 import (
 	"testing"
 	"time"
+
+	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 )
 
 func TestElapsed(t *testing.T) {
@@ -35,5 +37,32 @@ func TestUseColorRespectsEnvironment(t *testing.T) {
 	t.Setenv("TERM", "dumb")
 	if useColor() {
 		t.Error("TERM=dumb must disable color")
+	}
+}
+
+func TestUseString(t *testing.T) {
+	// Declared flags appear with - when off; enabled flags the recipe does
+	// not declare are appended; the result is sorted.
+	r := &recipe.Recipe{IUse: []string{"ssl", "zlib"}}
+	if got, want := useString(r, []string{"ssl", "extra"}), "extra ssl -zlib"; got != want {
+		t.Errorf("useString = %q, want %q", got, want)
+	}
+	if got, want := useString(&recipe.Recipe{}, []string{"b", "a"}), "a b"; got != want {
+		t.Errorf("useString without iuse = %q, want %q", got, want)
+	}
+	if got := useString(&recipe.Recipe{IUse: []string{"x"}}, nil); got != "-x" {
+		t.Errorf("useString all off = %q, want -x", got)
+	}
+}
+
+func TestPlural(t *testing.T) {
+	if got := plural(1, "package", "packages"); got != "package" {
+		t.Errorf("plural(1) = %q", got)
+	}
+	if got := plural(0, "package", "packages"); got != "packages" {
+		t.Errorf("plural(0) = %q", got)
+	}
+	if got := plural(2, "dependency", "dependencies"); got != "dependencies" {
+		t.Errorf("plural(2) = %q", got)
 	}
 }
