@@ -334,3 +334,48 @@ func TestUpgradePrunesDroppedFiles(t *testing.T) {
 		t.Errorf("locally modified file = %q, want it preserved", got)
 	}
 }
+
+func TestRemoveKeepsSymlinkedDirectories(t *testing.T) {
+	root := t.TempDir()
+	db := pkgdb.DB{Dir: filepath.Join(root, "var/lib/zpkg")}
+
+	// usr-merged layout: /lib is a symlink to usr/lib.
+	if err := os.MkdirAll(filepath.Join(root, "usr/lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("usr/lib", filepath.Join(root, "lib")); err != nil {
+		t.Skipf("cannot create symlinks here: %v", err)
+	}
+
+	// The package installed a file through /lib and its destroot carried
+	// directory entries for the whole path, including "lib".
+	writeTree(t, root, map[string]string{"usr/lib/firmware/x.bin": "fw"})
+	sum, err := hash.File(filepath.Join(root, "usr/lib/firmware/x.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &pkgdb.Rec{Name: "fw", Slot: "0", Version: "1.0", Entries: []manifest.Entry{
+		{Kind: "dir", Path: "lib"},
+		{Kind: "dir", Path: "usr"},
+		{Kind: "dir", Path: "usr/lib"},
+		{Kind: "dir", Path: "usr/lib/firmware"},
+		{Kind: "file", Path: "usr/lib/firmware/x.bin", Hash: sum},
+	}}
+	if err := db.Save(rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove("fw", root, db); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Lstat(filepath.Join(root, "lib"))
+	if err != nil {
+		t.Fatalf("/lib disappeared: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("/lib is no longer a symlink")
+	}
+	if _, err := os.Stat(filepath.Join(root, "usr/lib/firmware/x.bin")); !os.IsNotExist(err) {
+		t.Error("firmware file survived removal")
+	}
+}

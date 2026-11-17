@@ -264,7 +264,16 @@ func Remove(name, root string, db pkgdb.DB) error {
 			if e.Kind != "dir" {
 				continue
 			}
-			os.Remove(filepath.Join(root, filepath.FromSlash(e.Path))) // best effort: only prunes empty dirs
+			p := filepath.Join(root, filepath.FromSlash(e.Path))
+			// Only prune real, empty directories. In particular /lib, /bin
+			// and /sbin are symlinks in a usr-merged root: os.Remove would
+			// delete the symlink itself, breaking every dynamically linked
+			// binary (linux-firmware's "dir lib" did exactly that in M22).
+			info, err := os.Lstat(p)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			os.Remove(p) // best effort: only prunes empty dirs
 		}
 		if err := db.Delete(rec.Name, rec.Slot); err != nil {
 			return err
