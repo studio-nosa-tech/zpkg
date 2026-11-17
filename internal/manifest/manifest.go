@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/studio-nosa-tech/zpkg/internal/hash"
@@ -31,40 +32,119 @@ func Ignored(path string) bool {
 func (e Entry) String() string {
 	switch e.Kind {
 	case "dir":
-		return fmt.Sprintf("dir %s", e.Path)
+		return fmt.Sprintf("dir %s", quoteField(e.Path))
 	case "link":
-		return fmt.Sprintf("link %s %s", e.Link, e.Path)
+		return fmt.Sprintf("link %s %s", quoteField(e.Link), quoteField(e.Path))
 	case "file":
-		return fmt.Sprintf("file %s %s", e.Hash, e.Path)
+		return fmt.Sprintf("file %s %s", e.Hash, quoteField(e.Path))
 	default:
-		return fmt.Sprintf("%s %s", e.Kind, e.Path)
+		return fmt.Sprintf("%s %s", e.Kind, quoteField(e.Path))
 	}
+}
+
+// quoteField quotes a path that would break the whitespace-separated
+// manifest format. Firmware files legitimately contain spaces
+// ("...Intel Corp.-VALLEYVIEW C0 PLATFORM.txt"), and symlink targets can
+// contain them too. Unquoted fields stay byte-identical to older manifests.
+func quoteField(s string) string {
+	if s == "" || strings.ContainsAny(s, " \t\"\\") {
+		return strconv.Quote(s)
+	}
+	return s
+}
+
+// takeField reads one field: a double-quoted Go string literal or the run
+// up to the next space. The remainder (without the separating space) is
+// returned as rest.
+func takeField(s string) (field, rest string, err error) {
+	s = strings.TrimLeft(s, " \t")
+	if s == "" {
+		return "", "", fmt.Errorf("missing field")
+	}
+	if s[0] == '"' {
+		i := 1
+		for i < len(s) {
+			if s[i] == '\\' {
+				i += 2
+				continue
+			}
+			if s[i] == '"' {
+				break
+			}
+			i++
+		}
+		if i >= len(s) {
+			return "", "", fmt.Errorf("unterminated quoted field")
+		}
+		v, err := strconv.Unquote(s[:i+1])
+		if err != nil {
+			return "", "", err
+		}
+		return v, strings.TrimLeft(s[i+1:], " \t"), nil
+	}
+	if i := strings.IndexAny(s, " \t"); i >= 0 {
+		return s[:i], strings.TrimLeft(s[i:], " \t"), nil
+	}
+	return s, "", nil
+}
+
+// takeRest reads the final field, unquoting a quoted value. An unquoted
+// value is taken verbatim (so manifests written before quoting existed,
+// which may contain spaces in the path, still parse).
+func takeRest(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", fmt.Errorf("missing path")
+	}
+	if s[0] == '"' {
+		v, rest, err := takeField(s)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(rest) != "" {
+			return "", fmt.Errorf("trailing data after quoted path")
+		}
+		return v, nil
+	}
+	return s, nil
 }
 
 // ParseLine parses a single manifest line.
 func ParseLine(line string) (Entry, error) {
-	f := strings.Fields(line)
-	if len(f) == 0 {
-		return Entry{}, fmt.Errorf("empty manifest line")
+	line = strings.TrimSpace(line)
+	kind, rest, err := takeField(line)
+	if err != nil {
+		return Entry{}, fmt.Errorf("malformed manifest line %q: %w", line, err)
 	}
-	switch f[0] {
+	switch kind {
 	case "dir":
-		if len(f) != 2 {
+		p, err := takeRest(rest)
+		if err != nil {
 			return Entry{}, fmt.Errorf("malformed dir entry %q", line)
 		}
-		return Entry{Kind: "dir", Path: f[1]}, nil
+		return Entry{Kind: "dir", Path: p}, nil
 	case "link":
-		if len(f) != 3 {
+		link, rest2, err := takeField(rest)
+		if err != nil {
 			return Entry{}, fmt.Errorf("malformed link entry %q", line)
 		}
-		return Entry{Kind: "link", Link: f[1], Path: f[2]}, nil
+		p, err := takeRest(rest2)
+		if err != nil {
+			return Entry{}, fmt.Errorf("malformed link entry %q", line)
+		}
+		return Entry{Kind: "link", Link: link, Path: p}, nil
 	case "file":
-		if len(f) != 3 {
+		sum, rest2, err := takeField(rest)
+		if err != nil {
 			return Entry{}, fmt.Errorf("malformed file entry %q", line)
 		}
-		return Entry{Kind: "file", Hash: f[1], Path: f[2]}, nil
+		p, err := takeRest(rest2)
+		if err != nil {
+			return Entry{}, fmt.Errorf("malformed file entry %q", line)
+		}
+		return Entry{Kind: "file", Hash: sum, Path: p}, nil
 	default:
-		return Entry{}, fmt.Errorf("unknown entry kind %q", f[0])
+		return Entry{}, fmt.Errorf("unknown entry kind %q", kind)
 	}
 }
 
