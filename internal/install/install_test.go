@@ -379,3 +379,60 @@ func TestRemoveKeepsSymlinkedDirectories(t *testing.T) {
 		t.Error("firmware file survived removal")
 	}
 }
+
+func TestRecoverInstallFromEventLog(t *testing.T) {
+	root := t.TempDir()
+	db := pkgdb.DB{Dir: filepath.Join(root, "var/lib/zpkg")}
+
+	// State an interrupted install leaves behind: the old version of "old"
+	// was moved to the backup and a partial new tree is in place.
+	backup := filepath.Join(txnDir(db), "backup/usr/bin/old")
+	if err := os.MkdirAll(filepath.Dir(backup), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, root, map[string]string{"usr/bin/old": "OLD"})
+	if err := os.Rename(filepath.Join(root, "usr/bin/old"), backup); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, root, map[string]string{"usr/bin/old": "NEW", "usr/bin/new": "NEW"})
+
+	j := &txnJournal{Kind: "install", Name: "pkg", Version: "1.0", Phase: phaseInstalling}
+	if err := saveJournalHeader(db, j); err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []journalEvent{
+		{Op: "created", Path: "usr/bin/new"},
+		{Op: "replaced", Path: "usr/bin/old"},
+	} {
+		if err := appendJournalEvent(db, ev.Op, ev.Path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A crash in the middle of an append leaves a torn last line. The file
+	// operation it names never ran, so recovery must ignore it.
+	f, err := os.OpenFile(eventsPath(db), os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"op":"created","path":"usr/bin/par`); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	msg, err := Recover(root, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg == "" {
+		t.Fatal("expected a rollback summary")
+	}
+	if got := readTree(t, root, "usr/bin/old"); got != "OLD" {
+		t.Errorf("old file restored as %q, want OLD", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "usr/bin/new")); !os.IsNotExist(err) {
+		t.Errorf("created file survived rollback: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(db.Dir, ".txn")); !os.IsNotExist(err) {
+		t.Errorf("txn dir still present: %v", err)
+	}
+}

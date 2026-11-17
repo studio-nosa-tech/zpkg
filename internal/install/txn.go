@@ -5,6 +5,7 @@
 package install
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,21 +21,87 @@ const (
 )
 
 // txnJournal is the on-disk record of an in-progress transaction.
+//
+// Install transactions keep the growing path lists in an append-only event
+// log next to the header (journal.log) instead of rewriting the whole
+// journal for every file. The old layout, with Replaced/Created inline, is
+// still read so an interrupted pre-log install can be recovered.
 type txnJournal struct {
 	Kind      string   `json:"kind"` // "install" | "remove"
 	Name      string   `json:"name"`
 	Slot      string   `json:"slot,omitempty"`
 	Version   string   `json:"version"`
 	Phase     string   `json:"phase"`
-	HadRecord bool     `json:"hadrecord"` // a record of Name existed before the install (upgrade)
-	Replaced  []string `json:"replaced"`  // install: existing paths moved aside
-	Created   []string `json:"created"`   // install: paths that did not exist before
-	Files     []string `json:"files"`     // remove: every path to delete
+	HadRecord bool     `json:"hadrecord"`          // a record of Name existed before the install (upgrade)
+	Replaced  []string `json:"replaced,omitempty"` // install: existing paths moved aside
+	Created   []string `json:"created,omitempty"`  // install: paths that did not exist before
+	Files     []string `json:"files,omitempty"`    // remove: every path to delete
+}
+
+// journalEvent is one line of the install event log. Each event is appended
+// (and synced) before the file operation it describes, so a crash leaves a
+// journal that can undo everything that happened.
+type journalEvent struct {
+	Op   string `json:"op"` // "created" | "replaced"
+	Path string `json:"path"`
 }
 
 func txnDir(db pkgdb.DB) string { return filepath.Join(db.Dir, ".txn") }
 func journalPath(db pkgdb.DB) string {
 	return filepath.Join(txnDir(db), "journal.json")
+}
+func eventsPath(db pkgdb.DB) string {
+	return filepath.Join(txnDir(db), "journal.log")
+}
+
+// appendJournalEvent records a path in the append-only install log. The
+// event is flushed before the caller touches the file it names.
+func appendJournalEvent(db pkgdb.DB, op, path string) error {
+	if err := os.MkdirAll(txnDir(db), 0o755); err != nil {
+		return err
+	}
+	line, err := json.Marshal(journalEvent{Op: op, Path: path})
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(eventsPath(db), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// loadJournalEvents merges the event log into j. A torn final line (crash in
+// the middle of an append) is ignored: the file operation it describes never
+// started, so there is nothing to undo.
+func loadJournalEvents(db pkgdb.DB, j *txnJournal) {
+	data, err := os.ReadFile(eventsPath(db))
+	if err != nil {
+		return
+	}
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var ev journalEvent
+		if json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+		switch ev.Op {
+		case "created":
+			j.Created = append(j.Created, ev.Path)
+		case "replaced":
+			j.Replaced = append(j.Replaced, ev.Path)
+		}
+	}
 }
 
 func saveJournal(db pkgdb.DB, j *txnJournal) error {
@@ -46,6 +113,15 @@ func saveJournal(db pkgdb.DB, j *txnJournal) error {
 		return err
 	}
 	return writeAtomic(journalPath(db), data)
+}
+
+// saveJournalHeader writes the install header only. The path lists live in
+// the event log; putting them in both places would double every entry on
+// recovery.
+func saveJournalHeader(db pkgdb.DB, j *txnJournal) error {
+	h := *j
+	h.Created, h.Replaced = nil, nil
+	return saveJournal(db, &h)
 }
 
 // Recover checks for an interrupted transaction and repairs the state:
@@ -74,6 +150,9 @@ func Recover(root string, db pkgdb.DB) (string, error) {
 			return "", err
 		}
 		return "moved an unreadable transaction journal aside (.txn.corrupt)", nil
+	}
+	if j.Kind == "install" {
+		loadJournalEvents(db, &j)
 	}
 
 	switch j.Kind {

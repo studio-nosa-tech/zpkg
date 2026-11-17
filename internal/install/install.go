@@ -44,7 +44,7 @@ func Apply(rec *pkgdb.Rec, destroot, root string, db pkgdb.DB) error {
 	if oldErr == nil {
 		j.HadRecord = true // upgrade: keep the old record if we must roll back
 	}
-	if err := saveJournal(db, j); err != nil {
+	if err := saveJournalHeader(db, j); err != nil {
 		return err
 	}
 	backup := filepath.Join(txnDir(db), "backup")
@@ -67,15 +67,21 @@ func Apply(rec *pkgdb.Rec, destroot, root string, db pkgdb.DB) error {
 					if err := os.MkdirAll(filepath.Dir(bk), 0o755); err != nil {
 						return err
 					}
+					// Record the move before making it: a crash between the
+					// two leaves the event without a backup (nothing to
+					// restore), never a backup the journal does not know.
+					j.Replaced = append(j.Replaced, e.Path)
+					if err := appendJournalEvent(db, "replaced", e.Path); err != nil {
+						return err
+					}
 					if err := os.Rename(dst, bk); err != nil {
 						return err
 					}
-					j.Replaced = append(j.Replaced, e.Path)
 				} else {
 					j.Created = append(j.Created, e.Path)
-				}
-				if err := saveJournal(db, j); err != nil {
-					return err
+					if err := appendJournalEvent(db, "created", e.Path); err != nil {
+						return err
+					}
 				}
 				if err := applyEntry(e, destroot, root); err != nil {
 					return err
@@ -91,7 +97,7 @@ func Apply(rec *pkgdb.Rec, destroot, root string, db pkgdb.DB) error {
 			}
 		}
 		j.Phase = phaseInstalled
-		return saveJournal(db, j)
+		return saveJournalHeader(db, j)
 	}()
 	if applyErr != nil {
 		if rbErr := rollbackInstall(root, db, j); rbErr != nil {
@@ -206,11 +212,12 @@ func pruneObsolete(old, rec *pkgdb.Rec, root, backup string, db pkgdb.DB, j *txn
 		if err := os.MkdirAll(filepath.Dir(bk), 0o755); err != nil {
 			return err
 		}
-		if err := os.Rename(p, bk); err != nil {
+		// As in Apply: journal the move before making it.
+		j.Replaced = append(j.Replaced, e.Path)
+		if err := appendJournalEvent(db, "replaced", e.Path); err != nil {
 			return err
 		}
-		j.Replaced = append(j.Replaced, e.Path)
-		if err := saveJournal(db, j); err != nil {
+		if err := os.Rename(p, bk); err != nil {
 			return err
 		}
 	}
