@@ -172,6 +172,9 @@ func MakeIndexWithOptions(dir string, opts IndexOptions) (int, error) {
 		}
 		return a.UseHash < b.UseHash
 	})
+	if err := validateIndex(&idx, priv != nil); err != nil {
+		return 0, err
+	}
 	data, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {
 		return 0, err
@@ -472,6 +475,9 @@ func validateIndex(idx *IndexFile, signed bool) error {
 		if idx.Schema != indexSchema {
 			return fmt.Errorf("unsupported index schema %d", idx.Schema)
 		}
+		if idx.Arch == "" {
+			return fmt.Errorf("index arch is missing")
+		}
 		if idx.Generation <= 0 {
 			return fmt.Errorf("index generation must be positive")
 		}
@@ -498,6 +504,9 @@ func validateIndex(idx *IndexFile, signed bool) error {
 		if signed {
 			if e.Version == "" {
 				return fmt.Errorf("%s: missing version", e.Filename)
+			}
+			if e.Arch == "" {
+				return fmt.Errorf("%s: missing arch", e.Filename)
 			}
 			if !validSHA(e.ManifestSha256) {
 				return fmt.Errorf("%s: missing manifest_sha256", e.Filename)
