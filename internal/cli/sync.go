@@ -12,11 +12,14 @@ import (
 	"strings"
 
 	"github.com/studio-nosa-tech/zpkg/internal/config"
+	"github.com/studio-nosa-tech/zpkg/internal/recipesig"
+	"github.com/studio-nosa-tech/zpkg/internal/security"
+	"github.com/studio-nosa-tech/zpkg/internal/sign"
 	"github.com/studio-nosa-tech/zpkg/internal/source"
 )
 
 const syncUsage = `Usage:
-  zpkg sync [--from <dir|tarball|URL>] [--dest <dir>] [-n]
+  zpkg sync [--from <dir|tarball|URL>] [--dest <dir>] [-n] [--allow-unsigned]
 
 Replace the recipe tree as a whole. The source may be:
   - a stage3 tarball (only usr/share/zignos/recipes is extracted)
@@ -24,15 +27,17 @@ Replace the recipe tree as a whole. The source may be:
   - a directory containing usr/share/zignos/recipes
 
 --from is required unless ZPKG_RECIPE_URL or RECIPEURL in
-/etc/zpkg/sync.conf is set. The new tree is validated (core and main),
-built in a temporary directory next to the target and renamed into place,
-so a failed sync leaves the old tree untouched.
+/etc/zpkg/sync.conf is set. The new tree is validated (core and main) and
+its recipes.manifest signature is verified against the trusted keys before
+the old tree is replaced. --allow-unsigned accepts a tree with no signature
+at all (development only; an invalid signature is always rejected).
 `
 
 type syncOptions struct {
-	from   string
-	dest   string
-	dryRun bool
+	from          string
+	dest          string
+	dryRun        bool
+	allowUnsigned bool
 }
 
 type syncStats struct {
@@ -50,6 +55,8 @@ func parseSyncArgs(args []string) (syncOptions, error) {
 		switch {
 		case a == "-n" || a == "--dry-run":
 			o.dryRun = true
+		case a == "--allow-unsigned":
+			o.allowUnsigned = true
 		case a == "--from" || a == "--dest":
 			if i+1 >= len(args) {
 				return o, fmt.Errorf("%s needs an argument", a)
@@ -112,7 +119,7 @@ func cmdSync(args []string) error {
 	}
 
 	phase("Syncing recipes from %s", from)
-	stats, err := syncRecipes(from, dest, cfg.Cache, o.dryRun)
+	stats, err := syncRecipes(cfg, from, dest, o.allowUnsigned, o.dryRun)
 	if err != nil {
 		return err
 	}
@@ -126,14 +133,19 @@ func cmdSync(args []string) error {
 		fmt.Printf("Would update %s\n", dest)
 		return nil
 	}
+	if m, err := recipesig.ReadManifest(dest); err == nil && m.KeyID != "" {
+		phase("Recipe signature: generation %d, key %s", m.Generation, m.KeyID)
+	} else {
+		fmt.Fprintln(os.Stderr, "zpkg: warning: recipe tree is unsigned")
+	}
 	phase("Updated %s", dest)
 	return nil
 }
 
 // syncRecipes stages the source tree in a sibling temporary directory and
-// swaps it with dest only after validation. A failed copy/extraction never
-// touches the working tree.
-func syncRecipes(from, dest, cacheDir string, dryRun bool) (syncStats, error) {
+// swaps it with dest only after validation and signature verification. A
+// failed copy/extraction/verification never touches the working tree.
+func syncRecipes(cfg config.Config, from, dest string, allowUnsigned, dryRun bool) (syncStats, error) {
 	parent := filepath.Dir(dest)
 	tmp, err := os.MkdirTemp(parent, ".zignos-recipes-sync-")
 	if err != nil {
@@ -147,7 +159,7 @@ func syncRecipes(from, dest, cacheDir string, dryRun bool) (syncStats, error) {
 	var srcRoot string
 	if isHTTP(from) {
 		phase("Downloading %s", from)
-		archive, err := source.Fetch(from, cacheDir)
+		archive, err := source.FetchFresh(from, cfg.Cache)
 		if err != nil {
 			return syncStats{}, err
 		}
@@ -188,6 +200,40 @@ func syncRecipes(from, dest, cacheDir string, dryRun bool) (syncStats, error) {
 	stats, err := scanRecipeTree(staging)
 	if err != nil {
 		return stats, err
+	}
+
+	keys, err := sign.LoadKeyring(cfg.TrustedKeys)
+	if err != nil {
+		return stats, err
+	}
+	verified, err := recipesig.Verify(staging, keys, allowUnsigned || cfg.AllowUnsigned, cfg.AllowExpired)
+	if err != nil {
+		return stats, err
+	}
+	if verified == nil {
+		fmt.Fprintln(os.Stderr, "zpkg: warning: recipe tree is unsigned (allowed by --allow-unsigned / ZPKG_ALLOW_UNSIGNED)")
+	} else if cfg.DB != "" {
+		statePath := filepath.Join(cfg.DB, ".security.json")
+		key := security.Key("recipes", dest)
+		store, err := security.Load(statePath)
+		if err != nil {
+			return stats, err
+		}
+		if err := store.Check(key, verified.Manifest.Generation, verified.SHA256); err != nil {
+			return stats, err
+		}
+		if !dryRun {
+			store.Update(key, security.Entry{
+				Kind:       "recipes",
+				Identity:   dest,
+				KeyID:      verified.Manifest.KeyID,
+				Generation: verified.Manifest.Generation,
+				SHA256:     verified.SHA256,
+			})
+			if err := store.Save(statePath); err != nil {
+				return stats, err
+			}
+		}
 	}
 	if dryRun {
 		return stats, nil

@@ -38,6 +38,16 @@ type Meta struct {
 	Provides  []string `json:"provides,omitempty"`     // virtual packages this record satisfies
 	Conflicts []string `json:"conflicts,omitempty"`    // packages this record must not coexist with
 	BuildID   string   `json:"buildid,omitempty"`
+
+	// Provenance of this installation. Origin is "source", "binpkg" (local
+	// build cache) or "binrepo". For binrepo, the key and generation describe
+	// the signed index that authorized the package.
+	Origin            string `json:"origin,omitempty"`
+	OriginRepo        string `json:"origin_repo,omitempty"`
+	OriginKeyID       string `json:"origin_keyid,omitempty"`
+	OriginGeneration  int64  `json:"origin_generation,omitempty"`
+	OriginIndexSHA256 string `json:"origin_index_sha256,omitempty"`
+	OriginPkgSHA256   string `json:"origin_pkg_sha256,omitempty"`
 }
 
 // Rec is one installed package record.

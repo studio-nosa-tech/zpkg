@@ -105,6 +105,23 @@ func cmdInfo(names []string) error {
 				if rec.Meta != nil && len(rec.Meta.UseFlags) > 0 {
 					fmt.Printf("  useflags: %s\n", joinDeps(rec.Meta.UseFlags))
 				}
+				if rec.Meta != nil && rec.Meta.Origin != "" {
+					line := "  origin: " + rec.Meta.Origin
+					if rec.Meta.OriginRepo != "" {
+						line += " " + rec.Meta.OriginRepo
+					}
+					if rec.Meta.OriginKeyID != "" {
+						line += fmt.Sprintf(" (key %s", rec.Meta.OriginKeyID)
+						if rec.Meta.OriginGeneration > 0 {
+							line += fmt.Sprintf(", generation %d", rec.Meta.OriginGeneration)
+						}
+						line += ")"
+					}
+					fmt.Println(line)
+					if rec.Meta.OriginPkgSHA256 != "" {
+						fmt.Printf("  package sha256: %s\n", rec.Meta.OriginPkgSHA256)
+					}
+				}
 			}
 		} else {
 			fmt.Println("  installed: -")

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/studio-nosa-tech/zpkg/internal/config"
+	"github.com/studio-nosa-tech/zpkg/internal/hash"
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 	"github.com/studio-nosa-tech/zpkg/internal/source"
@@ -37,6 +38,15 @@ type Result struct {
 	Recipe   *recipe.Recipe
 	Destroot string
 	Entries  []manifest.Entry
+
+	// Provenance of the artifact that was used. OriginKind is "source",
+	// "binpkg" (local cache) or "binrepo".
+	OriginKind        string
+	OriginRepo        string
+	OriginKeyID       string
+	OriginGeneration  int64
+	OriginIndexSHA256 string
+	OriginPkgSHA256   string
 }
 
 func copyFile(src, dst string, perm os.FileMode) error {
@@ -170,7 +180,15 @@ func LoadBinpkg(r *recipe.Recipe, cfg config.Config) *Result {
 	if err := source.Extract(filepath.Join(dir, base+".pkg.tar.gz"), tmp); err != nil {
 		return nil
 	}
-	return &Result{Recipe: r, Destroot: tmp, Entries: entries}
+	sum, _ := hash.File(filepath.Join(dir, base+".pkg.tar.gz"))
+	return &Result{
+		Recipe:          r,
+		Destroot:        tmp,
+		Entries:         entries,
+		OriginKind:      "binpkg",
+		OriginRepo:      dir,
+		OriginPkgSHA256: sum,
+	}
 }
 
 // Run fetches, verifies and extracts sources, then executes the build script
@@ -245,5 +263,5 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("%s: build script produced no files in destroot", r.Name)
 	}
-	return &Result{Recipe: r, Destroot: destroot, Entries: entries}, nil
+	return &Result{Recipe: r, Destroot: destroot, Entries: entries, OriginKind: "source"}, nil
 }

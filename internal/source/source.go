@@ -2,6 +2,7 @@
 package source
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,30 @@ import (
 
 	"github.com/studio-nosa-tech/zpkg/internal/hash"
 )
+
+// NotFoundError means the server answered 404. Callers that look for an
+// optional file (a detached signature, for example) can distinguish it from
+// a network failure.
+type NotFoundError struct{ URL string }
+
+func (e *NotFoundError) Error() string { return e.URL + ": not found" }
+
+// IsNotFound reports whether err is a 404 from a source download.
+func IsNotFound(err error) bool {
+	var nf *NotFoundError
+	return errors.As(err, &nf)
+}
+
+func cacheName(u *url.URL) (string, error) {
+	name := u.Fragment
+	if name == "" {
+		name = filepath.Base(u.Path)
+	}
+	if name == "" || name == "/" || name == "." {
+		return "", fmt.Errorf("cannot derive file name from %q", u.String())
+	}
+	return name, nil
+}
 
 // Fetch returns the cached file path for a source URL, downloading it on
 // first use. A URL fragment overrides the cache file name — GitHub tag
@@ -26,12 +51,9 @@ func Fetch(rawurl, cacheDir string) (string, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", fmt.Errorf("unsupported source scheme %q in %q", u.Scheme, rawurl)
 	}
-	name := u.Fragment
-	if name == "" {
-		name = filepath.Base(u.Path)
-	}
-	if name == "" || name == "/" || name == "." {
-		return "", fmt.Errorf("cannot derive file name from %q", rawurl)
+	name, err := cacheName(u)
+	if err != nil {
+		return "", err
 	}
 	dst := filepath.Join(cacheDir, name)
 	if _, err := os.Stat(dst); err == nil {
@@ -50,12 +72,54 @@ func Fetch(rawurl, cacheDir string) (string, error) {
 	return dst, nil
 }
 
+// FetchFresh always downloads rawurl, replacing the cached copy. Repository
+// indexes, detached signatures and recipe tarballs must not be served from a
+// stale cache: a new signed index has to be seen on the next command.
+func FetchFresh(rawurl, cacheDir string) (string, error) {
+	u, err := url.Parse(rawurl)
+	if err != nil {
+		return "", fmt.Errorf("bad source URL %q: %w", rawurl, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("unsupported source scheme %q in %q", u.Scheme, rawurl)
+	}
+	name, err := cacheName(u)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", err
+	}
+	dst := filepath.Join(cacheDir, name)
+	f, err := os.CreateTemp(cacheDir, "."+filepath.Base(name)+".part-")
+	if err != nil {
+		return "", err
+	}
+	tmp := f.Name()
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	if err := download(rawurl, tmp); err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	return dst, nil
+}
+
 func download(rawurl, dst string) error {
 	resp, err := http.Get(rawurl)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return &NotFoundError{URL: rawurl}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("%s: %s", rawurl, resp.Status)
 	}

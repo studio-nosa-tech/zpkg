@@ -15,6 +15,7 @@ import (
 	"github.com/studio-nosa-tech/zpkg/internal/install"
 	"github.com/studio-nosa-tech/zpkg/internal/pkgdb"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
+	"github.com/studio-nosa-tech/zpkg/internal/recipesig"
 	"github.com/studio-nosa-tech/zpkg/internal/world"
 )
 
@@ -36,6 +37,17 @@ func metaFromRecipe(r *recipe.Recipe, use []string) *pkgdb.Meta {
 		Provides:  append([]string{}, r.Provides...),
 		Conflicts: append([]string{}, r.Conflicts...),
 	}
+}
+
+// recipeTreeOrigin finds the recipe tree root (parent of the category dir)
+// and returns its signed manifest provenance, when present.
+func recipeTreeOrigin(r *recipe.Recipe) (root, keyID string, generation int64) {
+	root = filepath.Dir(filepath.Dir(r.Dir))
+	m, err := recipesig.ReadManifest(root)
+	if err != nil {
+		return root, "", 0
+	}
+	return root, m.KeyID, m.Generation
 }
 
 // installJob is one package in the resolved install order. target marks a
@@ -133,8 +145,13 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		res := build.LoadBinpkg(r, cfg)
 		if res == nil {
 			// No local cache hit: try a configured binary package
-			// repository before falling back to a source build.
-			res = build.LoadRepoBinpkg(r, cfg)
+			// repository before falling back to a source build. Signature,
+			// rollback and digest failures are hard errors.
+			var repoErr error
+			res, repoErr = build.LoadRepoBinpkg(r, cfg)
+			if repoErr != nil {
+				return repoErr
+			}
 		}
 		fromBinpkg := res != nil
 		if res == nil {
@@ -159,13 +176,29 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		} else {
 			phase("Installing (%d of %d) %s", i+1, len(jobs), label)
 		}
+		meta := metaFromRecipe(r, opts.Use)
+		meta.Origin = res.OriginKind
+		meta.OriginRepo = res.OriginRepo
+		meta.OriginKeyID = res.OriginKeyID
+		meta.OriginGeneration = res.OriginGeneration
+		meta.OriginIndexSHA256 = res.OriginIndexSHA256
+		meta.OriginPkgSHA256 = res.OriginPkgSHA256
+		if meta.Origin == "source" {
+			// The recipe tree itself may have been synced from a signed
+			// manifest; record that signer as the source provenance.
+			if root, keyID, generation := recipeTreeOrigin(r); keyID != "" {
+				meta.OriginRepo = root
+				meta.OriginKeyID = keyID
+				meta.OriginGeneration = generation
+			}
+		}
 		rec := &pkgdb.Rec{
 			Name:     r.Name,
 			Slot:     r.Slot,
 			Version:  r.Version,
 			Revision: r.Revision,
 			Entries:  res.Entries,
-			Meta:     metaFromRecipe(r, opts.Use),
+			Meta:     meta,
 		}
 		if err := install.Apply(rec, res.Destroot, cfg.Root, db); err != nil {
 			return err
@@ -337,14 +370,16 @@ func cmdMkIndex(args []string) error {
 	if err != nil {
 		return err
 	}
-	dir := cfg.Cache + "/binpkgs"
-	if len(args) > 0 {
-		dir = args[0]
+	defaultDir := filepath.Join(cfg.Cache, "binpkgs")
+	dir, opts, err := parseIndexArgs(args, defaultDir)
+	if err != nil {
+		return err
 	}
-	n, err := build.MakeIndex(dir)
+	n, err := build.MakeIndexWithOptions(dir, opts)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("indexed %d packages in %s\n", n, dir)
+	printIndexSummary(dir)
 	return nil
 }

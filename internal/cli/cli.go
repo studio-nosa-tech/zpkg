@@ -34,7 +34,7 @@ Usage:
   zpkg search <term>          search recipe repos
   zpkg mkindex [dir]          write index.json for a binary package
                               repository dir (default: the local binpkg cache)
-  zpkg sync [--from <src>] [--dest <dir>] [-n]
+  zpkg sync [--from <src>] [--dest <dir>] [-n] [--allow-unsigned]
                               replace the recipe tree from a stage3 tarball,
                               recipe tarball, directory or URL
                               --from  source; default $ZPKG_RECIPE_URL or
@@ -42,6 +42,21 @@ Usage:
                               --dest  target tree (default $ZPKG_ROOT/usr/
                                       share/zignos/recipes)
                               -n      validate and count only
+                              --allow-unsigned  accept a tree with no manifest
+                                                or signature (development)
+  zpkg key generate --private <path> [--public <path>]
+                              create an Ed25519 signing key pair
+  zpkg key import <pubkey>... add a trusted repository/recipe signing key
+  zpkg key list               list trusted keys
+  zpkg key remove <keyid>     remove a trusted key
+  zpkg sign --key <private> <file>...
+                              write <file>.sig (detached Ed25519 signature)
+  zpkg verify <file>...       verify <file>.sig with the trusted keys
+  zpkg sign-recipes --key <private> [--generation N] [--expires ...] [dir]
+                              sign a recipe tree (recipes.manifest + .sig)
+  zpkg mkindex [--key <private>] [--generation N] [--expires ...] [dir]
+                              write index.json; --key also signs it and
+                              publishes keys/<keyid>.pub
   zpkg use [flag | -flag]...  show or edit /etc/zpkg/use.conf (USE flags)
   zpkg use --package <pkg> [flag | -flag]...
                               show or edit the package's line in package.use
@@ -65,6 +80,14 @@ Environment:
                   source (or set BINREPO= in /etc/zpkg/binrepo.conf). A
                   match requires the same version, revision and effective
                   USE flags
+  ZPKG_TRUSTED_KEYS  directory of trusted *.pub signing keys (default
+                  $ZPKG_ROOT/etc/zpkg/trusted.d; also TRUSTED_KEYS= in
+                  /etc/zpkg/security.conf)
+  ZPKG_ALLOW_UNSIGNED=1  accept repository indexes / recipe trees with no
+                  signature at all (development only; a present but invalid
+                  signature is always rejected)
+  ZPKG_ALLOW_EXPIRED=1   ignore signature expiry (recovery only; rollback
+                  checks and signature verification still apply)
 
 World: packages you name on "install" are recorded in $ZPKG_DB/world and are
 what "upgrade" acts on. Dependencies are installed but not added to world.
@@ -147,6 +170,14 @@ func Run(args []string) error {
 		return cmdMkIndex(rest)
 	case "sync":
 		return cmdSync(rest)
+	case "key":
+		return cmdKey(rest)
+	case "sign":
+		return cmdSign(rest)
+	case "verify":
+		return cmdVerify(rest)
+	case "sign-recipes":
+		return cmdSignRecipes(rest)
 	default:
 		return fmt.Errorf("unknown command %q (try: zpkg help)", cmd)
 	}

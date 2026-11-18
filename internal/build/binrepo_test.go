@@ -4,11 +4,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/studio-nosa-tech/zpkg/internal/config"
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
 	"github.com/studio-nosa-tech/zpkg/internal/options"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
+	"github.com/studio-nosa-tech/zpkg/internal/sign"
 )
 
 func packTo(t *testing.T, cache, usehash string) *recipe.Recipe {
@@ -72,10 +74,15 @@ func TestMakeIndexAndRepoLoad(t *testing.T) {
 	// A fresh cache (no local binpkgs) with the repository configured: the
 	// package must be restored from the repository.
 	cfg := config.Config{
-		Cache:   t.TempDir(),
-		BinRepo: repo,
+		Cache:         t.TempDir(),
+		DB:            t.TempDir(),
+		BinRepo:       repo,
+		AllowUnsigned: true,
 	}
-	res := LoadRepoBinpkg(r, cfg)
+	res, err := LoadRepoBinpkg(r, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res == nil {
 		t.Fatal("repository package not restored")
 	}
@@ -112,16 +119,22 @@ func TestRepoNoMatchFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{Cache: t.TempDir(), BinRepo: repo, Options: o}
+	cfg := config.Config{Cache: t.TempDir(), DB: t.TempDir(), BinRepo: repo, Options: o, AllowUnsigned: true}
 	if o.Hash() == "" {
 		t.Fatal("options hash should be non-empty with a flag set")
 	}
-	res := LoadRepoBinpkg(&recipe.Recipe{Name: "hello", Version: "1.0.0", Revision: 2}, cfg)
+	res, err := LoadRepoBinpkg(&recipe.Recipe{Name: "hello", Version: "1.0.0", Revision: 2}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res != nil {
 		t.Fatal("a package with a different options hash must not match")
 	}
 	// A different version must not match either.
-	res = LoadRepoBinpkg(&recipe.Recipe{Name: "hello", Version: "9.9.9", Revision: 2}, cfg)
+	res, err = LoadRepoBinpkg(&recipe.Recipe{Name: "hello", Version: "9.9.9", Revision: 2}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res != nil {
 		t.Fatal("a package with a different version must not match")
 	}
@@ -129,12 +142,99 @@ func TestRepoNoMatchFallsBack(t *testing.T) {
 
 func TestRepoDisabledWithoutConfig(t *testing.T) {
 	cfg := config.Config{Cache: t.TempDir(), BinRepo: ""}
-	if res := LoadRepoBinpkg(&recipe.Recipe{Name: "hello", Version: "1.0.0"}, cfg); res != nil {
-		t.Fatal("no repository configured: must return nil")
+	res, err := LoadRepoBinpkg(&recipe.Recipe{Name: "hello", Version: "1.0.0"}, cfg)
+	if err != nil || res != nil {
+		t.Fatalf("no repository configured: %v, %v", res, err)
 	}
 	t.Setenv("ZPKG_NO_BINPKG", "1")
 	cfg.BinRepo = "/nonexistent"
-	if res := LoadRepoBinpkg(&recipe.Recipe{Name: "hello", Version: "1.0.0"}, cfg); res != nil {
-		t.Fatal("ZPKG_NO_BINPKG=1 must disable the repository too")
+	res, err = LoadRepoBinpkg(&recipe.Recipe{Name: "hello", Version: "1.0.0"}, cfg)
+	if err != nil || res != nil {
+		t.Fatalf("ZPKG_NO_BINPKG=1 must disable the repository too: %v, %v", res, err)
+	}
+}
+
+func signedRepo(t *testing.T, repo string, generation int64, expires time.Time) (trusted string) {
+	t.Helper()
+	keyDir := t.TempDir()
+	priv := filepath.Join(keyDir, "repo.key")
+	pub := filepath.Join(keyDir, "repo.pub")
+	if _, err := sign.WriteKeypair(priv, pub); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MakeIndexWithOptions(repo, IndexOptions{
+		Generation:  generation,
+		Expires:     expires,
+		SignKeyPath: priv,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	trusted = t.TempDir()
+	if _, _, err := sign.ImportPublicKey(trusted, pub); err != nil {
+		t.Fatal(err)
+	}
+	return trusted
+}
+
+func copyPkgToRepo(t *testing.T, cache, repo string) {
+	t.Helper()
+	cacheBin := filepath.Join(cache, "binpkgs")
+	items, err := os.ReadDir(cacheBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		data, err := os.ReadFile(filepath.Join(cacheBin, it.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, it.Name()), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestSignedRepo(t *testing.T) {
+	cache := t.TempDir()
+	r := packTo(t, cache, "")
+	repo := t.TempDir()
+	copyPkgToRepo(t, cache, repo)
+	trusted := signedRepo(t, repo, 1, time.Now().Add(time.Hour))
+	cfg := config.Config{Cache: t.TempDir(), DB: t.TempDir(), BinRepo: repo, TrustedKeys: trusted}
+	res, err := LoadRepoBinpkg(r, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil || res.OriginKind != "binrepo" || res.OriginKeyID == "" || res.OriginGeneration != 1 {
+		t.Fatalf("result = %+v", res)
+	}
+
+	// A tampered index must be a hard error, not a source-build fallback.
+	indexPath := filepath.Join(repo, "index.json")
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(indexPath, append(data, ' '), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadRepoBinpkg(r, cfg); err == nil {
+		t.Fatal("tampered index was accepted")
+	}
+}
+
+func TestSignedRepoExpiry(t *testing.T) {
+	cache := t.TempDir()
+	r := packTo(t, cache, "")
+	repo := t.TempDir()
+	copyPkgToRepo(t, cache, repo)
+	trusted := signedRepo(t, repo, 1, time.Now().Add(-time.Minute))
+	cfg := config.Config{Cache: t.TempDir(), DB: t.TempDir(), BinRepo: repo, TrustedKeys: trusted}
+	if _, err := LoadRepoBinpkg(r, cfg); err == nil {
+		t.Fatal("expired index accepted")
+	}
+	cfg.AllowExpired = true
+	if _, err := LoadRepoBinpkg(r, cfg); err != nil {
+		t.Fatalf("allow expired: %v", err)
 	}
 }

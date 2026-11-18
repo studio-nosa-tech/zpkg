@@ -11,7 +11,22 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
+
+	"github.com/studio-nosa-tech/zpkg/internal/config"
+	"github.com/studio-nosa-tech/zpkg/internal/recipesig"
+	"github.com/studio-nosa-tech/zpkg/internal/sign"
 )
+
+func testSyncConfig(t *testing.T) config.Config {
+	t.Helper()
+	return config.Config{
+		Cache:         t.TempDir(),
+		DB:            t.TempDir(),
+		TrustedKeys:   t.TempDir(),
+		AllowUnsigned: true,
+	}
+}
 
 func writeRecipe(t *testing.T, root, cat, name, version string) string {
 	t.Helper()
@@ -81,7 +96,7 @@ func TestSyncRecipesDirectory(t *testing.T) {
 	dest := t.TempDir()
 	writeRecipe(t, dest, "core", "old", "0")
 
-	stats, err := syncRecipes(src, dest, t.TempDir(), false)
+	stats, err := syncRecipes(testSyncConfig(t), src, dest, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +123,7 @@ func TestSyncRecipesDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := syncRecipes(src, dest, t.TempDir(), true); err != nil {
+	if _, err := syncRecipes(testSyncConfig(t), src, dest, false, true); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(filepath.Join(dest, "core", "foo", "version"))
@@ -122,7 +137,7 @@ func TestSyncRecipesInvalidLeavesTarget(t *testing.T) {
 	writeRecipe(t, src, "core", "foo", "1") // no main
 	dest := t.TempDir()
 	writeRecipe(t, dest, "core", "old", "0")
-	if _, err := syncRecipes(src, dest, t.TempDir(), false); err == nil {
+	if _, err := syncRecipes(testSyncConfig(t), src, dest, false, false); err == nil {
 		t.Fatal("sync of incomplete tree succeeded")
 	}
 	if _, err := os.Stat(filepath.Join(dest, "core", "old", "version")); err != nil {
@@ -185,7 +200,7 @@ func TestSyncRecipesStage3Archive(t *testing.T) {
 	}
 
 	dest := t.TempDir()
-	stats, err := syncRecipes(archive, dest, t.TempDir(), false)
+	stats, err := syncRecipes(testSyncConfig(t), archive, dest, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +244,7 @@ func TestSyncRecipesURL(t *testing.T) {
 	defer srv.Close()
 
 	dest := t.TempDir()
-	stats, err := syncRecipes(srv.URL+"/recipes.tar.gz", dest, t.TempDir(), false)
+	stats, err := syncRecipes(testSyncConfig(t), srv.URL+"/recipes.tar.gz", dest, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,5 +253,103 @@ func TestSyncRecipesURL(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dest, "main", "bar", "version")); err != nil {
 		t.Fatalf("URL recipe missing: %v", err)
+	}
+}
+
+func signTree(t *testing.T, root string, generation int64, expires time.Time) (trusted, priv string) {
+	t.Helper()
+	keyDir := t.TempDir()
+	priv = filepath.Join(keyDir, "recipes.key")
+	pub := filepath.Join(keyDir, "recipes.pub")
+	if _, err := sign.WriteKeypair(priv, pub); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recipesig.Sign(root, priv, generation, expires); err != nil {
+		t.Fatal(err)
+	}
+	trusted = t.TempDir()
+	if _, _, err := sign.ImportPublicKey(trusted, pub); err != nil {
+		t.Fatal(err)
+	}
+	return trusted, priv
+}
+
+func TestSyncRecipesSignedAndRollback(t *testing.T) {
+	src := t.TempDir()
+	writeRecipe(t, src, "core", "foo", "1")
+	writeRecipe(t, src, "main", "bar", "2")
+	trusted, priv := signTree(t, src, 1, time.Now().Add(time.Hour))
+	dest := t.TempDir()
+	writeRecipe(t, dest, "core", "old", "0")
+
+	cfg := config.Config{
+		Cache:       t.TempDir(),
+		DB:          t.TempDir(),
+		TrustedKeys: trusted,
+	}
+	if _, err := syncRecipes(cfg, src, dest, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "core", "foo", "build")); err != nil {
+		t.Fatalf("signed tree not installed: %v", err)
+	}
+
+	// A newer generation is accepted.
+	if err := os.WriteFile(filepath.Join(src, "core", "foo", "build"), []byte("#!/bin/sh\necho 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recipesig.Sign(src, priv, 2, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncRecipes(cfg, src, dest, false, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-signing an older generation must be rejected as a rollback.
+	if _, err := recipesig.Sign(src, priv, 1, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncRecipes(cfg, src, dest, false, false); err == nil {
+		t.Fatal("rollback to generation 1 was accepted")
+	}
+	// The rejected tree must not have replaced the target.
+	data, err := os.ReadFile(filepath.Join(dest, "core", "foo", "build"))
+	if err != nil || string(data) != "#!/bin/sh\necho 2\n" {
+		t.Fatalf("target changed by rejected sync: %q, %v", data, err)
+	}
+
+	// Tampering after signing is rejected before the swap.
+	if _, err := recipesig.Sign(src, priv, 3, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "core", "foo", "build"), []byte("#!/bin/sh\necho evil\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncRecipes(cfg, src, dest, false, false); err == nil {
+		t.Fatal("tampered recipe tree was accepted")
+	}
+
+	// Unsigned trees are rejected unless explicitly allowed, and an invalid
+	// signature is never accepted by --allow-unsigned.
+	unsigned := t.TempDir()
+	writeRecipe(t, unsigned, "core", "foo", "1")
+	writeRecipe(t, unsigned, "main", "bar", "2")
+	if _, err := syncRecipes(cfg, unsigned, dest, false, false); err == nil {
+		t.Fatal("unsigned tree accepted without --allow-unsigned")
+	}
+	if _, err := syncRecipes(cfg, unsigned, dest, true, true); err != nil {
+		t.Fatalf("unsigned tree with --allow-unsigned: %v", err)
+	}
+	bad := t.TempDir()
+	writeRecipe(t, bad, "core", "foo", "1")
+	writeRecipe(t, bad, "main", "bar", "2")
+	if _, err := recipesig.Sign(bad, priv, 4, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bad, recipesig.SignatureName), []byte("garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncRecipes(cfg, bad, dest, true, true); err == nil {
+		t.Fatal("invalid signature accepted with --allow-unsigned")
 	}
 }

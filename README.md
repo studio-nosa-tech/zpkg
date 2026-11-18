@@ -63,8 +63,14 @@ Total: 2 packages (1 target, 1 dependency)
 | `world` | 明示インストール一覧 |
 | `search <term>` | レシピ検索 |
 | `use [flag\|-flag]...` / `use --package <pkg> ...` | USE フラグの表示・編集(グローバル / package.use) |
-| `mkindex [dir]` | binpkg リポジトリ用 `index.json` を生成 |
-| `sync [--from <src>] [--dest <dir>] [-n]` | レシピツリー全体を stage3/レシピ tarball・ディレクトリ・URL から置換。`-n` は検証のみ |
+| `mkindex [--key <private>] [--generation N] [--expires ...] [dir]` | binpkg リポジトリ用 `index.json` を生成。`--key` で署名し `keys/<keyid>.pub` も出力 |
+| `sync [--from <src>] [--dest <dir>] [-n] [--allow-unsigned]` | レシピツリー全体を stage3/レシピ tarball・ディレクトリ・URL から置換。署名付き `recipes.manifest` を検証 |
+| `key generate --private <path> [--public <path>]` | Ed25519 署名鍵ペアを生成(秘密鍵 0600) |
+| `key import <pubkey>...` | 公開鍵を trusted.d に登録 |
+| `key list` / `key remove <keyid>` | 信頼済み鍵の一覧 / 削除 |
+| `sign --key <private> <file>...` | `<file>.sig`(detached Ed25519 署名)を生成 |
+| `verify <file>...` | `<file>.sig` を trusted.d の鍵で検証 |
+| `sign-recipes --key <private> [--generation N] [--expires ...] [dir]` | レシピツリーの `recipes.manifest` と署名を生成 |
 | `recover` | 中断したトランザクションの修復(install はロールバック、remove は完了) |
 
 `-f` は「インストール済みでも処理する」フラグで、**binpkg キャッシュは無視しない**。
@@ -95,6 +101,95 @@ zpkg sync --from ./zignos-recipes -n
 `$ZPKG_ROOT/usr/share/zignos/recipes`)。stage3 の tarball を渡した場合、
 `usr/share/zignos/recipes` 以外は展開しない。
 
+`sync` は新しいツリーの `recipes.manifest` を trusted key で検証してから
+置換する。署名がない場合は既定で拒否し、開発時のみ `--allow-unsigned`
+(または `ZPKG_ALLOW_UNSIGNED=1`)で許可する。署名が存在して壊れている
+場合は `--allow-unsigned` でも拒否する。
+
+## 署名と検証
+
+配布物は Ed25519 の detached signature で検証する。外部の GPG や
+`golang.org/x/crypto` には依存しない。
+
+### 鍵
+
+```sh
+# リポジトリ/レシピ署名用の鍵ペア(秘密鍵は 0600、既存ファイルは上書きしない)
+zpkg key generate --private ~/zignos-signing.key --public ~/zignos-signing.pub
+
+# クライアント: 公開鍵を信頼する(フィンガープリントは別経路で確認する)
+zpkg key import zignos-signing.pub
+zpkg key list
+```
+
+- key ID = Ed25519 公開鍵 32 バイトの SHA-256(64 hex)
+- 信頼済み鍵: `$ZPKG_ROOT/etc/zpkg/trusted.d/*.pub`(既定)
+- TOFU はしない。`key import` した鍵だけを信頼する
+- 秘密鍵が group/other から読める場合、Unix では読み込みを拒否する
+- 秘密鍵はレシピツリーや binrepo の中に置かない(`mkindex` / `sign-recipes`
+  が拒否する)
+
+### binpkg リポジトリ
+
+推奨レイアウト(従来のフラット配置も読める):
+
+```
+binrepo/
+├── index.json
+├── index.json.sig
+├── keys/<keyid>.pub
+└── packages/
+    ├── gcc.pkg.tar.gz
+    ├── gcc.manifest
+    └── gcc.meta.json
+```
+
+```sh
+zpkg mkindex --key ~/zignos-signing.key --generation 42 --expires 90d /srv/binrepo
+```
+
+`index.json`(schema 2)は `generation` / `expires` / `keyid` を持ち、
+`index.json.sig` がその実バイト列への署名になる。各エントリの
+`manifest_sha256` も検証する。クライアントは trusted key による署名、
+期限、前回見た generation との比較を行い、改ざん・期限切れ・巻き戻しを
+ハードエラーにする(ソースビルドへ黙って逃げない)。
+
+### レシピツリー
+
+```sh
+zpkg sign-recipes --key ~/zignos-signing.key --generation 42 --expires 90d .
+```
+
+`recipes.manifest` は `.git` と署名自身を除く全 regular file の
+path / sha256 / size / mode を列挙する。`sync` は manifest の署名、
+全ファイルのハッシュ、manifest にない余計なファイルを検証する。
+stage3 に同梱されたツリーでも同じ検証ができる。
+
+### ロールバック対策と期限
+
+- `generation` は単調増加。省略時は既存の index/manifest の +1
+- `expires` は RFC3339 または `90d` / `720h`。既定 +90 日
+- 最後に受理した generation と SHA-256 を
+  `$ZPKG_DB/.security.json` に保存する
+- 新しい generation が保存値より小さい → ロールバックとして拒否
+- 同じ generation で内容が違う → すり替えとして拒否
+- 期限切れ → 拒否。`ZPKG_ALLOW_EXPIRED=1` は期限だけ解除する
+  (署名・ロールバック検証は残る)
+- `--allow-unsigned` は署名が**存在しない**場合だけ許可する。壊れた署名を
+  受け入れる抜け道にはならない
+
+### 検証ポリシー
+
+```ini
+# /etc/zpkg/security.conf
+TRUSTED_KEYS=/etc/zpkg/trusted.d
+ALLOW_UNSIGNED=0
+ALLOW_EXPIRED=0
+```
+
+環境変数 `ZPKG_TRUSTED_KEYS` / `ZPKG_ALLOW_UNSIGNED` /
+`ZPKG_ALLOW_EXPIRED` が設定ファイルより優先される。
+
 ## 環境変数
 
 | 変数 | 既定 | 内容 |
@@ -107,6 +202,9 @@ zpkg sync --from ./zignos-recipes -n
 | `ZPKG_NO_BINPKG` | なし | `1` でローカル/リポジトリの binpkg を無効化 |
 | `ZPKG_BINREPO` | なし | binpkg リポジトリの URL/パス(`/etc/zpkg/binrepo.conf` の `BINREPO=` でも可) |
 | `ZPKG_RECIPE_URL` | なし | `zpkg sync` の既定ソース(URL/パス)。`/etc/zpkg/sync.conf` の `RECIPEURL=` でも可 |
+| `ZPKG_TRUSTED_KEYS` | `$ZPKG_ROOT/etc/zpkg/trusted.d` | 信頼する `*.pub` のディレクトリ(`security.conf` の `TRUSTED_KEYS=` でも可) |
+| `ZPKG_ALLOW_UNSIGNED` | なし | `1` で署名のない index/レシピツリーを許可(開発用。壊れた署名は不可) |
+| `ZPKG_ALLOW_EXPIRED` | なし | `1` で署名の期限切れだけ許可(復旧用) |
 | `ZPKG_USE` / `ZPKG_CFLAGS` / `ZPKG_MAKEOPTS` | ファイル | USE とビルドフラグの上書き(空文字も「明示的に空」) |
 
 設定ファイル(ターゲットルート配下):
@@ -116,6 +214,7 @@ zpkg sync --from ./zignos-recipes -n
 - `/etc/zpkg/make.conf` — `CFLAGS=` / `MAKEOPTS=`
 - `/etc/zpkg/binrepo.conf` — `BINREPO=`
 - `/etc/zpkg/sync.conf` — `RECIPEURL=`(`zpkg sync` の既定ソース)
+- `/etc/zpkg/security.conf` — `TRUSTED_KEYS=` / `ALLOW_UNSIGNED=` / `ALLOW_EXPIRED=`
 
 ## レシピ形式(ディレクトリ型・KISS 式)
 
@@ -186,6 +285,10 @@ zpkg sync --from ./zignos-recipes -n
   (`flag?pkg` / `!flag?pkg`)の検証、実効 USE の binpkg キーへの反映
 - binpkg: ローカルキャッシュ(`binpkgs/`)とリポジトリ(`ZPKG_BINREPO` + `mkindex`)。
   一致条件は name / arch / version+revision / 実効 USE ハッシュ
+- 署名: Ed25519 の detached signature。binrepo の `index.json` とレシピツリーの
+  `recipes.manifest` を署名し、trusted key(`/etc/zpkg/trusted.d`)、
+  ロールバック対策(`generation` + `.security.json`)、期限(`expires`)を検証する。
+  インストール済みメタデータに origin / 署名鍵 / generation を記録
 - slots: `name@slot` レコード。別スロットとのファイル重複はエラー
 - world / upgrade: 明示インストール集合の追跡、`--newuse`、upgrade 時の
   不要ファイル削除(内容一致時のみ、ロールバック可能)
@@ -199,5 +302,8 @@ zpkg sync --from ./zignos-recipes -n
 
 - SAT solver / 複数バージョン・スロットを考慮した完全なソルバーは未実装
   (現在は決定的バックトラック。1 名 1 バージョンのレシピツリーが前提)
-- binpkg リポジトリの署名と配布は未対応(index への署名が将来課題)
-- 取得は http/https のみ
+- 公開 binpkg リポジトリの運用・鍵配布は未整備(署名の仕組みと `keys/` 出力は実装済み)
+- 鍵失効リスト(CRL)は未対応。`key remove` によるローテーションで運用する
+- GPG/OpenPGP は未対応。署名 envelope の `algorithm` を拡張して将来追加する
+- Secure Boot(GRUB/kernel の署名)は別問題で未対応
+- 取得は http/https のみ(署名検証は http でも行うが、https を推奨)
