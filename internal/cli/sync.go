@@ -135,8 +135,6 @@ func cmdSync(args []string) error {
 	}
 	if m, err := recipesig.ReadManifest(dest); err == nil && m.KeyID != "" {
 		phase("Recipe signature: generation %d, key %s", m.Generation, m.KeyID)
-	} else {
-		fmt.Fprintln(os.Stderr, "zpkg: warning: recipe tree is unsigned")
 	}
 	phase("Updated %s", dest)
 	return nil
