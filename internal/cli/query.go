@@ -40,20 +40,37 @@ func cmdSearch(args []string) error {
 	if err := requireRepos(cfg); err != nil {
 		return err
 	}
+	seen := map[string]bool{}
 	for _, repo := range cfg.Repos {
 		items, err := os.ReadDir(repo)
 		if err != nil {
 			return err
 		}
 		for _, it := range items {
-			if !it.IsDir() || !strings.Contains(it.Name(), term) {
+			if !it.IsDir() || strings.HasPrefix(it.Name(), ".") || seen[it.Name()] {
 				continue
 			}
+			seen[it.Name()] = true
 			r, err := recipe.Load(cfg.Repos, it.Name())
 			if err != nil {
 				return err
 			}
-			fmt.Printf("%s %s %s\n", filepath.Base(repo), r.Name, r.FullVersion())
+			nameHit := strings.Contains(r.Name, term)
+			providesHit := ""
+			for _, p := range r.Provides {
+				if strings.Contains(p, term) {
+					providesHit = p
+					break
+				}
+			}
+			if !nameHit && providesHit == "" {
+				continue
+			}
+			if nameHit {
+				fmt.Printf("%s %s %s\n", filepath.Base(repo), r.Name, r.FullVersion())
+			} else {
+				fmt.Printf("%s %s %s (provides %s)\n", filepath.Base(repo), r.Name, r.FullVersion(), providesHit)
+			}
 		}
 	}
 	return nil

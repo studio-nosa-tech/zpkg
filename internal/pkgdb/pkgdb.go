@@ -35,6 +35,8 @@ type Meta struct {
 	UseFlags  []string `json:"useflags,omitempty"`
 	Depends   []string `json:"depends,omitempty"`      // runtime dependencies
 	BuildDeps []string `json:"builddepends,omitempty"` // build-only dependencies
+	Provides  []string `json:"provides,omitempty"`     // virtual packages this record satisfies
+	Conflicts []string `json:"conflicts,omitempty"`    // packages this record must not coexist with
 	BuildID   string   `json:"buildid,omitempty"`
 }
 

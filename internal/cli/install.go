@@ -33,6 +33,8 @@ func metaFromRecipe(r *recipe.Recipe, use []string) *pkgdb.Meta {
 		UseFlags:  append([]string{}, use...),
 		Depends:   append([]string{}, r.Depends...),
 		BuildDeps: append([]string{}, r.MakeDepends...),
+		Provides:  append([]string{}, r.Provides...),
+		Conflicts: append([]string{}, r.Conflicts...),
 	}
 }
 
@@ -66,15 +68,21 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		installed[pkgdb.SlotKey(ref.Name, ref.Slot)] = true
 	}
 
-	order, err := resolve(cfg, targets)
+	plan, err := resolvePlan(cfg, targets)
 	if err != nil {
 		return err
+	}
+	targetSet := map[string]bool{}
+	for _, name := range plan.Targets {
+		if name != "" {
+			targetSet[name] = true
+		}
 	}
 	// Load every recipe first: the pre-build plan and the "(i of n)" in the
 	// progress markers need the list of packages that will actually be
 	// handled (skipped ones do not count).
 	var jobs []installJob
-	for _, name := range order {
+	for _, name := range plan.Order {
 		r, err := recipe.Load(cfg.Repos, name)
 		if err != nil {
 			return err
@@ -84,12 +92,12 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		// slots). With force every named target is rebuilt and
 		// reinstalled; dependencies that are already present are still
 		// skipped so only the requested packages are replaced.
-		skip := installed[pkgdb.SlotKey(name, r.Slot)] && !(o.force && contains(targets, name))
+		skip := installed[pkgdb.SlotKey(name, r.Slot)] && !(o.force && targetSet[name])
 		if skip {
 			phase("Skipping %s (already installed)", pkgLabel(r))
 			continue
 		}
-		jobs = append(jobs, installJob{r: r, target: contains(targets, name)})
+		jobs = append(jobs, installJob{r: r, target: targetSet[name]})
 	}
 
 	if len(jobs) > 0 {
@@ -162,9 +170,10 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		if err := install.Apply(rec, res.Destroot, cfg.Root, db); err != nil {
 			return err
 		}
-		// Only packages named on the command line become world members;
-		// dependencies are tracked but not part of the world set.
-		if contains(targets, r.Name) && !o.asdeps {
+		// Only packages named on the command line (or the providers chosen
+		// for virtual targets) become world members; dependencies are
+		// tracked but not part of the world set.
+		if targetSet[r.Name] && !o.asdeps {
 			if err := world.Add(cfg.DB, r.Name); err != nil {
 				return err
 			}
@@ -178,12 +187,38 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 	return nil
 }
 
-func cmdRemove(names []string) error {
+func cmdRemove(args []string) error {
+	force := false
+	var names []string
+	for _, a := range args {
+		switch a {
+		case "-f", "--force":
+			force = true
+		default:
+			if strings.HasPrefix(a, "-") {
+				return fmt.Errorf("unknown option %q", a)
+			}
+			names = append(names, a)
+		}
+	}
+	if len(names) == 0 {
+		return fmt.Errorf("usage: zpkg remove [-f] <pkg>...")
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
 	db := pkgdb.DB{Dir: cfg.DB}
+	if !force {
+		dependents, err := reverseDependents(cfg, db, names)
+		if err != nil {
+			return err
+		}
+		if len(dependents) > 0 {
+			return fmt.Errorf("cannot remove %s: required by %s (use -f to override)",
+				strings.Join(names, " "), strings.Join(dependents, ", "))
+		}
+	}
 	for i, name := range names {
 		phase("Removing (%d of %d) %s", i+1, len(names), name)
 		// The recipe may be gone from the tree; hooks are best-effort.

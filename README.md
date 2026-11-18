@@ -52,11 +52,11 @@ Total: 2 packages (1 target, 1 dependency)
 
 | コマンド | 動作 |
 |---|---|
-| `depends <pkg>...` | 依存(と makedepends)を含むビルド順の表示 |
+| `depends [-r] <pkg>...` | 依存(と makedepends)を含むビルド順。`-r` はインストール済みの逆依存を表示 |
 | `build [-f] <pkg>...` | fetch → 検証 → destroot まで(インストールしない) |
 | `install [-f] [-p] [--asdeps] <pkg>...` | 必要ならビルドして `$ZPKG_ROOT` へ。`-p` は pretend、`--asdeps` は world に追加しない |
 | `upgrade [-p] [--newuse] [pkg]...` | world(または指定 pkg)をレシピの版へ。`--newuse` は USE 変更時に再ビルド |
-| `remove <pkg>...` | 全スロットを削除し world から除去 |
+| `remove [-f] <pkg>...` | 全スロットを削除し world から除去。逆依存がある場合は停止(`-f` で強制) |
 | `list` | インストール済み一覧(`name@slot` 表示) |
 | `info <pkg>...` | インストール済みメタデータとレシピの版 |
 | `owner <path>...` | パスの所有パッケージ |
@@ -145,11 +145,45 @@ zpkg sync --from ./zignos-recipes -n
 - `.patch` / `.diff` は展開されず `$ZPKG_SRC` に置かれる
 - 空白を含むパスもマニフェストに記録できる(Go 文字列クォート形式)
 
+## 依存アトムと解決
+
+`depends` / `makedepends` / `provides` / `conflicts` は次のアトムを書ける。
+
+| 例 | 意味 |
+|---|---|
+| `foo` | 任意バージョンの `foo` |
+| `>=foo-1.2` / `<foo-2.0` / `=foo-1.2-r3` | バージョン制約(`>`, `<=`, `!=` も可) |
+| `ssl?openssl` | `ssl` が有効なときだけ `openssl` |
+| `!ssl?gnutls` | `ssl` が無効なときだけ `gnutls` |
+| `foo[ssl]` / `foo[-ssl]` | 依存先の `ssl` が有効 / 無効であること |
+| `foo[ssl?]` | 依存先が `ssl` を知っている場合だけ有効であること |
+| `ssl?foo[ssl,-zlib]` | 条件と USE 制約の組み合わせ |
+
+- バージョン制約は演算子付きで書く。`foo-1.2` はパッケージ名として扱う
+  (名前に `-` と数字を含むパッケージがあるため)
+- `provides` は `virtual/mailer` または `virtual/mailer-1.2`。バージョン省略時は
+  提供側パッケージのバージョンを使う
+- `conflicts` はバージョン制約・virtual 名も書ける。選択済みパッケージと
+  インストール済みパッケージの両方に対して検査する
+- 条件フラグは依存元レシピの `iuse` に存在する必要がある
+- リゾルバは決定的なバックトラック方式:
+  - 直接レシピと `provides` の候補を、インストール済み → 直接名 → 名前順で試す
+  - バージョン / USE 制約を満たさない候補と、conflict する候補を除外
+  - 失敗したら別の provider / 候補へ戻る
+  - `virtual/foo` を install すると provider を選び、provider を world に記録する
+- `zpkg depends -r <pkg>` はインストール済みの逆依存を表示する。
+  `zpkg remove` は逆依存があると停止し、`-f` で強制できる
+- **SAT solver は未実装**。現在はバックトラック解決で、候補選択の API は
+  将来 SAT バックエンドへ差し替えられるよう `internal/resolve` に分離している
+- 制限: レシピは名前ごとに 1 バージョン(複数バージョン/スロットは解決対象外)。
+  逆依存はインストール済み DB を基準にする
+
 ## 実装済みの機能
 
-- 依存解決: `depends` + `makedepends` の DFS トポロジカルソート(循環はエラー)
+- 依存解決: 依存アトムのバックトラック解決(バージョン制約、provides、conflicts、
+  条件依存、USE 制約)。依存が先のトポロジカルソート、循環はエラー
 - USE フラグ: `use.conf` / `package.use` / 環境変数、`iuse` による条件付き依存
-  (`flag?pkg`)の検証、実効 USE の binpkg キーへの反映
+  (`flag?pkg` / `!flag?pkg`)の検証、実効 USE の binpkg キーへの反映
 - binpkg: ローカルキャッシュ(`binpkgs/`)とリポジトリ(`ZPKG_BINREPO` + `mkindex`)。
   一致条件は name / arch / version+revision / 実効 USE ハッシュ
 - slots: `name@slot` レコード。別スロットとのファイル重複はエラー
@@ -163,7 +197,7 @@ zpkg sync --from ./zignos-recipes -n
 
 ## 既知の制限
 
-- バージョン制約付き依存(`>=foo-1.2`)と本格的なソルバーは未実装(名前のみ)。
-  `provides` / `conflicts` は記録のみ
+- SAT solver / 複数バージョン・スロットを考慮した完全なソルバーは未実装
+  (現在は決定的バックトラック。1 名 1 バージョンのレシピツリーが前提)
 - binpkg リポジトリの署名と配布は未対応(index への署名が将来課題)
 - 取得は http/https のみ

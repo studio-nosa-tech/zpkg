@@ -7,14 +7,13 @@ import (
 	"strings"
 
 	"github.com/studio-nosa-tech/zpkg/internal/config"
-	"github.com/studio-nosa-tech/zpkg/internal/dep"
-	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 )
 
 const usage = `zpkg - ZIGNOS package manager (v0.9)
 
 Usage:
-  zpkg depends <pkg>...       print build order including dependencies
+  zpkg depends [-r] <pkg>...  print build order including dependencies;
+                              -r/--reverse prints installed dependents
   zpkg build [-f] <pkg>...    fetch, verify and build into a destroot (no install)
   zpkg install [-f] [-p] [--asdeps] <pkg>...
                               build if needed, then install into ZPKG_ROOT
@@ -25,8 +24,9 @@ Usage:
                               upgrade world (or the named packages) to the
                               recipe versions; --newuse also rebuilds a
                               package whose effective USE flags changed
-  zpkg remove <pkg>...        remove installed packages (all slots) and
-                              their world entries
+  zpkg remove [-f] <pkg>...   remove installed packages (all slots) and
+                              their world entries; -f skips the reverse-
+                              dependency safety check
   zpkg list                   list installed packages
   zpkg info <pkg>...          installed metadata and the available recipe
   zpkg owner <path>...        which package owns a path
@@ -117,7 +117,7 @@ func Run(args []string) error {
 		fmt.Print(usage)
 		return nil
 	case "depends":
-		return withArgs(cmd, rest, cmdDepends)
+		return cmdDepends(rest)
 	case "build":
 		targets, o := parseInstallArgs(rest)
 		return withArgs(cmd, targets, func(t []string) error { return cmdBuildInstall(t, false, o) })
@@ -128,7 +128,7 @@ func Run(args []string) error {
 		targets, o := parseInstallArgs(rest)
 		return cmdUpgrade(targets, o)
 	case "remove":
-		return withArgs(cmd, rest, cmdRemove)
+		return cmdRemove(rest)
 	case "list":
 		return cmdList()
 	case "info":
@@ -172,70 +172,6 @@ func contains(names []string, name string) bool {
 func requireRepos(cfg config.Config) error {
 	if len(cfg.Repos) == 0 {
 		return fmt.Errorf("no recipe repos found: set ZPKG_REPOS or install the /usr/share/zignos/recipes tree")
-	}
-	return nil
-}
-
-// recipeDeps is the dependency list used for build ordering: both runtime
-// and build-only dependencies must be built before the package.
-func recipeDeps(r *recipe.Recipe) []string {
-	deps := make([]string, 0, len(r.Depends)+len(r.MakeDepends))
-	deps = append(deps, r.Depends...)
-	deps = append(deps, r.MakeDepends...)
-	return deps
-}
-
-// resolve returns targets with dependencies in build order. Conditional
-// dependencies are expanded with the options that apply to each package,
-// and recipes that declare IUSE are checked for typos in flag names.
-func resolve(cfg config.Config, targets []string) ([]string, error) {
-	load := func(name string) ([]string, error) {
-		r, err := recipe.Load(cfg.Repos, name)
-		if err != nil {
-			return nil, err
-		}
-		deps := recipeDeps(r)
-		if err := validateConditionalDeps(r, deps); err != nil {
-			return nil, err
-		}
-		return cfg.Options.ForPackage(name).Expand(deps), nil
-	}
-	return dep.Order(targets, load)
-}
-
-// validateConditionalDeps rejects "flag?pkg" entries whose flag is not
-// declared in the recipe's iuse file (when one exists).
-func validateConditionalDeps(r *recipe.Recipe, deps []string) error {
-	if len(r.IUse) == 0 {
-		return nil
-	}
-	for _, d := range deps {
-		i := strings.IndexByte(d, '?')
-		if i < 0 {
-			continue
-		}
-		flag := d[:i]
-		if !contains(r.IUse, flag) {
-			return fmt.Errorf("%s: conditional dependency uses flag %q, which is not in iuse", r.Name, flag)
-		}
-	}
-	return nil
-}
-
-func cmdDepends(targets []string) error {
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	if err := requireRepos(cfg); err != nil {
-		return err
-	}
-	order, err := resolve(cfg, targets)
-	if err != nil {
-		return err
-	}
-	for _, name := range order {
-		fmt.Println(name)
 	}
 	return nil
 }
