@@ -34,6 +34,14 @@ Usage:
   zpkg search <term>          search recipe repos
   zpkg mkindex [dir]          write index.json for a binary package
                               repository dir (default: the local binpkg cache)
+  zpkg sync [--from <src>] [--dest <dir>] [-n]
+                              replace the recipe tree from a stage3 tarball,
+                              recipe tarball, directory or URL
+                              --from  source; default $ZPKG_RECIPE_URL or
+                                      RECIPEURL in /etc/zpkg/sync.conf
+                              --dest  target tree (default $ZPKG_ROOT/usr/
+                                      share/zignos/recipes)
+                              -n      validate and count only
   zpkg use [flag | -flag]...  show or edit /etc/zpkg/use.conf (USE flags)
   zpkg use --package <pkg> [flag | -flag]...
                               show or edit the package's line in package.use
@@ -50,6 +58,8 @@ Environment:
   ZPKG_FORCE   set to 1 to allow removing modified packages
   ZPKG_NO_BINPKG  set to 1 to always build from source (skip cached binpkgs
                   and binary repositories)
+  ZPKG_RECIPE_URL default source for "zpkg sync" (URL or path); overrides
+                  RECIPEURL in /etc/zpkg/sync.conf
   ZPKG_BINREPO    base URL/path of a binary package repository; install
                   tries a matching package from it before building from
                   source (or set BINREPO= in /etc/zpkg/binrepo.conf). A
@@ -135,6 +145,8 @@ func Run(args []string) error {
 		return cmdRecover()
 	case "mkindex":
 		return cmdMkIndex(rest)
+	case "sync":
+		return cmdSync(rest)
 	default:
 		return fmt.Errorf("unknown command %q (try: zpkg help)", cmd)
 	}

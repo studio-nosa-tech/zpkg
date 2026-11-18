@@ -64,11 +64,36 @@ Total: 2 packages (1 target, 1 dependency)
 | `search <term>` | レシピ検索 |
 | `use [flag\|-flag]...` / `use --package <pkg> ...` | USE フラグの表示・編集(グローバル / package.use) |
 | `mkindex [dir]` | binpkg リポジトリ用 `index.json` を生成 |
+| `sync [--from <src>] [--dest <dir>] [-n]` | レシピツリー全体を stage3/レシピ tarball・ディレクトリ・URL から置換。`-n` は検証のみ |
 | `recover` | 中断したトランザクションの修復(install はロールバック、remove は完了) |
 
 `-f` は「インストール済みでも処理する」フラグで、**binpkg キャッシュは無視しない**。
 同じ version+revision+実効 USE の binpkg があればそれを使うので、レシピ内容を
 変えたときは `revision` を上げる。
+
+## レシピツリーの更新
+
+stage3 に同梱される `/usr/share/zignos/recipes` はスナップショットなので、
+新しいパッケージを使うにはレシピツリーを更新する。`sync` は新しいツリーを
+一時領域で検証してから原子的に置き換える(失敗時は旧ツリーを維持)。
+
+```sh
+# 新しい stage3 tarball から(レシピ部分だけを展開する)
+zpkg sync --from /path/to/zignos-stage3-20261119-r6.tar.xz
+
+# レシピだけの tarball / 展開済みディレクトリ / URL も可
+zpkg sync --from /path/to/zignos-recipes.tar.xz
+zpkg sync --from ./zignos-recipes
+zpkg sync --from https://example.invalid/zignos-recipes.tar.xz
+
+# 検証だけ
+zpkg sync --from ./zignos-recipes -n
+```
+
+`--from` を省略すると `ZPKG_RECIPE_URL`、次に `/etc/zpkg/sync.conf` の
+`RECIPEURL=` を使う。`--dest` で置換先を変更できる(既定:
+`$ZPKG_ROOT/usr/share/zignos/recipes`)。stage3 の tarball を渡した場合、
+`usr/share/zignos/recipes` 以外は展開しない。
 
 ## 環境変数
 
@@ -81,6 +106,7 @@ Total: 2 packages (1 target, 1 dependency)
 | `ZPKG_FORCE` | なし | `1` で改変済みパッケージの remove を許可 |
 | `ZPKG_NO_BINPKG` | なし | `1` でローカル/リポジトリの binpkg を無効化 |
 | `ZPKG_BINREPO` | なし | binpkg リポジトリの URL/パス(`/etc/zpkg/binrepo.conf` の `BINREPO=` でも可) |
+| `ZPKG_RECIPE_URL` | なし | `zpkg sync` の既定ソース(URL/パス)。`/etc/zpkg/sync.conf` の `RECIPEURL=` でも可 |
 | `ZPKG_USE` / `ZPKG_CFLAGS` / `ZPKG_MAKEOPTS` | ファイル | USE とビルドフラグの上書き(空文字も「明示的に空」) |
 
 設定ファイル(ターゲットルート配下):
@@ -89,6 +115,7 @@ Total: 2 packages (1 target, 1 dependency)
 - `/etc/zpkg/package.use` — パッケージ単位の USE 上書き
 - `/etc/zpkg/make.conf` — `CFLAGS=` / `MAKEOPTS=`
 - `/etc/zpkg/binrepo.conf` — `BINREPO=`
+- `/etc/zpkg/sync.conf` — `RECIPEURL=`(`zpkg sync` の既定ソース)
 
 ## レシピ形式(ディレクトリ型・KISS 式)
 

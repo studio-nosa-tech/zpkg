@@ -11,12 +11,13 @@ import (
 
 // Config holds the runtime layout.
 type Config struct {
-	Repos   []string        // recipe repos, in search order (first match wins)
-	Root    string          // target system root, absolute
-	Cache   string          // source downloads and build workdirs
-	DB      string          // installed package database
-	Options options.Options // USE flags and build options for Root
-	BinRepo string          // binary package repository (URL or local dir), "" = none
+	Repos     []string        // recipe repos, in search order (first match wins)
+	Root      string          // target system root, absolute
+	Cache     string          // source downloads and build workdirs
+	DB        string          // installed package database
+	Options   options.Options // USE flags and build options for Root
+	BinRepo   string          // binary package repository (URL or local dir), "" = none
+	RecipeURL string          // default source for "zpkg sync" (URL or path), "" = none
 }
 
 // Load builds a Config from the ZPKG_* environment variables.
@@ -59,6 +60,14 @@ func Load() (Config, error) {
 	cfg.BinRepo = os.Getenv("ZPKG_BINREPO")
 	if cfg.BinRepo == "" {
 		if cfg.BinRepo, err = options.ReadVar(absRoot, "etc/zpkg/binrepo.conf", "BINREPO"); err != nil {
+			return Config{}, err
+		}
+	}
+	// Default recipe source for "zpkg sync": env wins, then
+	// /etc/zpkg/sync.conf.
+	cfg.RecipeURL = os.Getenv("ZPKG_RECIPE_URL")
+	if cfg.RecipeURL == "" {
+		if cfg.RecipeURL, err = options.ReadVar(absRoot, "etc/zpkg/sync.conf", "RECIPEURL"); err != nil {
 			return Config{}, err
 		}
 	}
