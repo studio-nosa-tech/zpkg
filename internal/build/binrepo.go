@@ -49,6 +49,11 @@ type BinMeta struct {
 	UseHash  string   `json:"usehash"` // options hash, "" when no options were set
 	Arch     string   `json:"arch"`
 	Depends  []string `json:"depends,omitempty"`
+
+	Sandbox       string `json:"sandbox,omitempty"`
+	Network       string `json:"network,omitempty"`
+	BuildEnvHash  string `json:"build_env_hash,omitempty"`
+	BuildEnvCount int    `json:"build_env_count,omitempty"`
 }
 
 const binMetaSchema = 1
@@ -58,7 +63,7 @@ func binMetaName(base string) string { return base + ".meta.json" }
 // writeBinMeta writes the sidecar next to a packed binary package. Recipe
 // deps are captured so the index (and therefore consumers) can record them
 // without the recipe tree.
-func writeBinMeta(dir, base string, r *recipe.Recipe, optsHash string) error {
+func writeBinMeta(dir, base string, r *recipe.Recipe, optsHash string, res *Result) error {
 	m := BinMeta{
 		Schema:   binMetaSchema,
 		Name:     r.Name,
@@ -67,6 +72,18 @@ func writeBinMeta(dir, base string, r *recipe.Recipe, optsHash string) error {
 		UseHash:  optsHash,
 		Arch:     runtime.GOARCH,
 		Depends:  append([]string{}, r.Depends...),
+	}
+	if res != nil {
+		m.Sandbox = res.Sandbox
+		if res.Sandbox != "" {
+			if res.Network {
+				m.Network = "on"
+			} else {
+				m.Network = "off"
+			}
+		}
+		m.BuildEnvHash = res.BuildEnvHash
+		m.BuildEnvCount = res.BuildEnvCount
 	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {

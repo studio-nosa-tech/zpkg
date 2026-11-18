@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/studio-nosa-tech/zpkg/internal/hash"
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
+	"github.com/studio-nosa-tech/zpkg/internal/sandbox"
 	"github.com/studio-nosa-tech/zpkg/internal/source"
 )
 
@@ -47,6 +49,12 @@ type Result struct {
 	OriginGeneration  int64
 	OriginIndexSHA256 string
 	OriginPkgSHA256   string
+
+	// Build environment provenance for source builds.
+	Sandbox       string // "bwrap" or "none"
+	Network       bool
+	BuildEnvHash  string
+	BuildEnvCount int
 }
 
 func copyFile(src, dst string, perm os.FileMode) error {
@@ -149,7 +157,7 @@ func PackBinpkg(r *recipe.Recipe, res *Result, cacheDir, optsHash string) (strin
 	if err := manifest.Write(filepath.Join(dir, base+".manifest"), res.Entries); err != nil {
 		return "", err
 	}
-	if err := writeBinMeta(dir, base, r, optsHash); err != nil {
+	if err := writeBinMeta(dir, base, r, optsHash, res); err != nil {
 		return "", err
 	}
 	return pkgPath, nil
@@ -236,23 +244,60 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 	}
 
 	opts := cfg.Options.ForPackage(r.Name)
-	cmd := exec.Command("bash", r.Build)
-	cmd.Dir = src
+	network := cfg.BuildNetwork
+	if r.BuildNetwork != nil {
+		network = *r.BuildNetwork
+	}
+	bwrapPath, isolated, err := resolveBuildSandbox(r, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := sandbox.PrepareWork(work); err != nil {
+		return nil, err
+	}
+	env := sandbox.Env(sandbox.EnvOptions{
+		Root:      cfg.Root,
+		WorkDir:   work,
+		CacheDir:  cfg.Cache,
+		Destroot:  destroot,
+		SourceDir: src,
+		RecipeDir: r.Dir,
+		Name:      r.Name,
+		Version:   r.Version,
+		Use:       strings.Join(opts.Use, " "),
+		CFlags:    opts.CFlags,
+		MakeOpts:  opts.MakeOpts,
+		Network:   network,
+		Sandboxed: isolated,
+	})
+
+	var cmd *exec.Cmd
+	engine := "none"
+	if isolated {
+		engine = "bwrap"
+		cmd = exec.Command(bwrapPath, sandbox.Args(sandbox.Options{
+			BwrapPath:   bwrapPath,
+			WorkDir:     work,
+			SourceDir:   src,
+			RecipeDir:   r.Dir,
+			CacheDir:    cfg.Cache,
+			BuildScript: r.Build,
+			Env:         env,
+			Network:     network,
+		})...)
+		// bwrap clears the environment for the child; keeping the bwrap
+		// process itself bare avoids leaking host variables to it.
+		cmd.Env = []string{}
+	} else {
+		cmd = exec.Command("bash", r.Build)
+		cmd.Dir = src
+		cmd.Env = env
+	}
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	cmd.Env = append(os.Environ(),
-		"ZPKG_NAME="+r.Name,
-		"ZPKG_VERSION="+r.Version,
-		"ZPKG_RECIPE_DIR="+r.Dir,
-		"ZPKG_ROOT="+cfg.Root,
-		"ZPKG_CACHE="+cfg.Cache,
-		"ZPKG_DESTROOT="+destroot,
-		"ZPKG_SRC="+src,
-		"ZPKG_WORKDIR="+work,
-		"ZPKG_USE="+strings.Join(opts.Use, " "),
-		"ZPKG_CFLAGS="+opts.CFlags,
-		"ZPKG_MAKEOPTS="+opts.MakeOpts,
-	)
 	if err := cmd.Run(); err != nil {
+		if isolated {
+			return nil, fmt.Errorf("%s: sandboxed build failed: %w (set ZPKG_SANDBOX=off to build without isolation)", r.Name, err)
+		}
 		return nil, fmt.Errorf("%s: build script failed: %w", r.Name, err)
 	}
 
@@ -263,5 +308,49 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("%s: build script produced no files in destroot", r.Name)
 	}
-	return &Result{Recipe: r, Destroot: destroot, Entries: entries, OriginKind: "source"}, nil
+	return &Result{
+		Recipe: r, Destroot: destroot, Entries: entries, OriginKind: "source",
+		Sandbox: engine, Network: network,
+	}, nil
+}
+
+// resolveBuildSandbox applies the sandbox policy. auto falls back to an
+// unsandboxed build with a warning; require refuses to continue.
+func resolveBuildSandbox(r *recipe.Recipe, cfg config.Config) (string, bool, error) {
+	mode, err := sandbox.ParseMode(cfg.SandboxMode)
+	if err != nil {
+		return "", false, err
+	}
+	if runtime.GOOS != "linux" {
+		if mode == sandbox.ModeRequire {
+			return "", false, fmt.Errorf("build sandbox requires Linux")
+		}
+		return "", false, nil
+	}
+	if cfg.Root != "/" {
+		if mode == sandbox.ModeRequire {
+			return "", false, fmt.Errorf("build sandbox requires running inside the target root (ZPKG_ROOT=/); chroot into it or set ZPKG_SANDBOX=off")
+		}
+		if mode == sandbox.ModeAuto {
+			fmt.Fprintf(os.Stderr, "zpkg: warning: build sandbox requires ZPKG_ROOT=/; building %s without sandbox\n", r.Name)
+		}
+		return "", false, nil
+	}
+	path, ok, err := sandbox.Resolve(mode, cfg.BwrapPath)
+	if err != nil {
+		return "", false, err
+	}
+	if ok {
+		if checkErr := sandbox.Check(path); checkErr != nil {
+			if mode == sandbox.ModeAuto {
+				fmt.Fprintf(os.Stderr, "zpkg: warning: %v; building %s without sandbox (enter the chroot via zignos-enter.sh or set ZPKG_SANDBOX=off)\n", checkErr, r.Name)
+				return "", false, nil
+			}
+			return "", false, checkErr
+		}
+	}
+	if !ok && mode == sandbox.ModeAuto {
+		fmt.Fprintf(os.Stderr, "zpkg: warning: bubblewrap not found; building %s without sandbox (install bubblewrap or set ZPKG_SANDBOX=require)\n", r.Name)
+	}
+	return path, ok, nil
 }

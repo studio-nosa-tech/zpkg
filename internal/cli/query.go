@@ -122,6 +122,19 @@ func cmdInfo(names []string) error {
 						fmt.Printf("  package sha256: %s\n", rec.Meta.OriginPkgSHA256)
 					}
 				}
+				if rec.Meta != nil && rec.Meta.BuildSandbox != "" {
+					line := "  build: " + rec.Meta.BuildSandbox
+					if rec.Meta.BuildNetwork != "" {
+						line += ", network " + rec.Meta.BuildNetwork
+					}
+					if rec.Meta.BuildEnvCount > 0 {
+						line += fmt.Sprintf(", env %d packages", rec.Meta.BuildEnvCount)
+						if rec.Meta.BuildEnvHash != "" {
+							line += " (" + rec.Meta.BuildEnvHash[:12] + "...)"
+						}
+					}
+					fmt.Println(line)
+				}
 			}
 		} else {
 			fmt.Println("  installed: -")

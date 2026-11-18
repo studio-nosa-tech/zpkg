@@ -53,8 +53,8 @@ Total: 2 packages (1 target, 1 dependency)
 | コマンド | 動作 |
 |---|---|
 | `depends [-r] <pkg>...` | 依存(と makedepends)を含むビルド順。`-r` はインストール済みの逆依存を表示 |
-| `build [-f] <pkg>...` | fetch → 検証 → destroot まで(インストールしない) |
-| `install [-f] [-p] [--asdeps] <pkg>...` | 必要ならビルドして `$ZPKG_ROOT` へ。`-p` は pretend、`--asdeps` は world に追加しない |
+| `build [-f] [--no-sandbox] <pkg>...` | fetch → 検証 → destroot まで(インストールしない)。build は既定で bubblewrap 内 |
+| `install [-f] [-p] [--asdeps] [--no-sandbox] <pkg>...` | 必要ならビルドして `$ZPKG_ROOT` へ。`-p` は pretend、`--asdeps` は world に追加しない |
 | `upgrade [-p] [--newuse] [pkg]...` | world(または指定 pkg)をレシピの版へ。`--newuse` は USE 変更時に再ビルド |
 | `remove [-f] <pkg>...` | 全スロットを削除し world から除去。逆依存がある場合は停止(`-f` で強制) |
 | `list` | インストール済み一覧(`name@slot` 表示) |
@@ -190,6 +190,62 @@ ALLOW_EXPIRED=0
 環境変数 `ZPKG_TRUSTED_KEYS` / `ZPKG_ALLOW_UNSIGNED` /
 `ZPKG_ALLOW_EXPIRED` が設定ファイルより優先される。
 
+## ビルド環境の隔離
+
+レシピの `build` は任意のコマンドを実行できるため、既定で **bubblewrap** の
+サンドボックス内で実行する。
+
+- root 全体は読み取り専用(`--ro-bind / /`)。書き込みできるのは
+  `$ZPKG_CACHE/build/<pkg>` だけ
+- `/tmp`、`/run`、`/var/tmp`、`/var/lib`、`/var/log`、`/root`、`/home`、
+  `/mnt`、`/media`、`/srv` は空の tmpfs
+- `/etc/ssh`、`/etc/ssl/private`、`/etc/zpkg`、`/etc/NetworkManager/system-connections`、
+  `/etc/wpa_supplicant` はマスク。`/etc/shadow`、`/etc/gshadow`、`/etc/sudoers`、
+  `/etc/doas.conf`、`/etc/machine-id` は `/dev/null`
+- PID / IPC / UTS namespace を分離し、hostname は `zignos-build`
+- capability は `CAP_CHOWN` / `CAP_FOWNER` / `CAP_DAC_OVERRIDE` / `CAP_FSETID` /
+  `CAP_SYS_CHROOT` のみ(`doas`/`sudo` の chown、setuid、`zignos-mkinitramfs` 用)。
+  `CAP_SYS_ADMIN` はないので読み取り専用 root を remount できない
+- 環境変数は allowlist(`PATH` / `HOME` / `TMPDIR` / `LANG` / `LC_ALL` /
+  `GOCACHE` / `GOPATH` / `ZPKG_*` など)。`http_proxy` 系だけ引き継ぐ
+- `ZPKG_ROOT=/` かつ Linux のときだけ適用。それ以外は `auto` なら警告して
+  直接ビルド、`require` ならエラー
+
+```sh
+ZPKG_SANDBOX=auto      # 既定: bwrap があれば使い、無ければ警告して直接ビルド
+ZPKG_SANDBOX=require   # bwrap が無い/使えない場合は失敗
+ZPKG_SANDBOX=off       # サンドボックスなし
+zpkg build --no-sandbox <pkg>
+```
+
+`/etc/zpkg/sandbox.conf`:
+
+```ini
+SANDBOX=auto
+BUILD_NET=1
+#BWRAP=/usr/bin/bwrap
+```
+
+### ネットワーク
+
+ビルド時のネットワークは既定で許可する。再現性を重視する場合は
+`BUILD_NET=0` / `ZPKG_BUILD_NET=0` で拒否でき、`--unshare-net` が付く。
+
+レシピの `build_network` ファイル(`1` / `0`)がグローバル設定を上書きする。
+Go モジュールを取得する `age` / `fzf` / `restic` は `1` を明示している。
+
+### サンドボックスと chroot
+
+bubblewrap の `pivot_root` は chroot 先が mount point であることを要求する。
+`zignos-enter.sh` は private mount namespace を作り、root を bind mount してから
+chroot するため、stage3 のディレクトリ chroot でもサンドボックスが動く。
+素の `chroot` で入った場合は `auto` が警告して直接ビルドにフォールバックする。
+
+ビルド環境の fingerprint(`name@slot-version` の sha256 と件数)は
+`meta.json` と binpkg sidecar に記録され、`zpkg info` で表示される。
+サンドボックス内に見えるのはインストール済みシステム全体(読み取り専用)で、
+makedepends だけの最小ルートではない。
+
 ## 環境変数
 
 | 変数 | 既定 | 内容 |
@@ -205,6 +261,9 @@ ALLOW_EXPIRED=0
 | `ZPKG_TRUSTED_KEYS` | `$ZPKG_ROOT/etc/zpkg/trusted.d` | 信頼する `*.pub` のディレクトリ(`security.conf` の `TRUSTED_KEYS=` でも可) |
 | `ZPKG_ALLOW_UNSIGNED` | なし | `1` で署名のない index/レシピツリーを許可(開発用。壊れた署名は不可) |
 | `ZPKG_ALLOW_EXPIRED` | なし | `1` で署名の期限切れだけ許可(復旧用) |
+| `ZPKG_SANDBOX` | `auto` | `auto` / `require` / `off`。build の bubblewrap 隔離 |
+| `ZPKG_BUILD_NET` | `1` | `0` でビルドを network namespace 内に隔離 |
+| `ZPKG_BWRAP` | `bwrap` | bubblewrap の実行ファイル |
 | `ZPKG_USE` / `ZPKG_CFLAGS` / `ZPKG_MAKEOPTS` | ファイル | USE とビルドフラグの上書き(空文字も「明示的に空」) |
 
 設定ファイル(ターゲットルート配下):
@@ -215,6 +274,7 @@ ALLOW_EXPIRED=0
 - `/etc/zpkg/binrepo.conf` — `BINREPO=`
 - `/etc/zpkg/sync.conf` — `RECIPEURL=`(`zpkg sync` の既定ソース)
 - `/etc/zpkg/security.conf` — `TRUSTED_KEYS=` / `ALLOW_UNSIGNED=` / `ALLOW_EXPIRED=`
+- `/etc/zpkg/sandbox.conf` — `SANDBOX=` / `BUILD_NET=` / `BWRAP=`
 
 ## レシピ形式(ディレクトリ型・KISS 式)
 
@@ -229,6 +289,7 @@ ALLOW_EXPIRED=0
 ├── slot          # 共存スロット(既定 0)
 ├── iuse          # 理解する USE フラグ
 ├── provides / conflicts
+├── build_network # 1/0 でビルド時ネットワークを上書き(省略時はグローバル)
 ├── build         # bash スクリプト。必須。恒久的に shell
 ├── post_install  # 任意のフック
 └── post_remove   # 任意のフック
@@ -238,7 +299,7 @@ ALLOW_EXPIRED=0
 成果物を置く契約(`make DESTDIR="$ZPKG_DESTROOT" install` 等)。渡される環境:
 `ZPKG_NAME` / `ZPKG_VERSION` / `ZPKG_RECIPE_DIR` / `ZPKG_ROOT` / `ZPKG_CACHE` /
 `ZPKG_DESTROOT` / `ZPKG_SRC` / `ZPKG_WORKDIR` / `ZPKG_USE` / `ZPKG_CFLAGS` /
-`ZPKG_MAKEOPTS`。
+`ZPKG_MAKEOPTS` / `ZPKG_SANDBOX` / `ZPKG_BUILD_NET`。
 
 - `sources` の URL に `#ファイル名` を付けるとキャッシュ名を指定できる
 - `.patch` / `.diff` は展開されず `$ZPKG_SRC` に置かれる
@@ -289,6 +350,10 @@ ALLOW_EXPIRED=0
   `recipes.manifest` を署名し、trusted key(`/etc/zpkg/trusted.d`)、
   ロールバック対策(`generation` + `.security.json`)、期限(`expires`)を検証する。
   インストール済みメタデータに origin / 署名鍵 / generation を記録
+- ビルド隔離: bubblewrap による読み取り専用 root、書き込み可能な work のみ、
+  PID/IPC/UTS namespace、capability 制限、環境変数 allowlist、任意の
+  network namespace 分離。`auto` / `require` / `off` と `--no-sandbox`。
+  build env の fingerprint を `meta.json` に記録
 - slots: `name@slot` レコード。別スロットとのファイル重複はエラー
 - world / upgrade: 明示インストール集合の追跡、`--newuse`、upgrade 時の
   不要ファイル削除(内容一致時のみ、ロールバック可能)
@@ -307,3 +372,9 @@ ALLOW_EXPIRED=0
 - GPG/OpenPGP は未対応。署名 envelope の `algorithm` を拡張して将来追加する
 - Secure Boot(GRUB/kernel の署名)は別問題で未対応
 - 取得は http/https のみ(署名検証は http でも行うが、https を推奨)
+- ビルド隔離は bubblewrap のみ。`post_install` / `post_remove` フック、
+  ソース tarball の展開、CPU/メモリ/ディスクの resource limit は対象外
+- サンドボックス内に見えるのはインストール済みシステム全体(読み取り専用)。
+  makedepends だけの最小ビルドルートは未実装
+- 素の `chroot` では bwrap の `pivot_root` が使えないため、`auto` は警告して
+  直接ビルドにフォールバックする。stage3 では `zignos-enter.sh` を使う

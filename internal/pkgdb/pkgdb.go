@@ -48,6 +48,12 @@ type Meta struct {
 	OriginGeneration  int64  `json:"origin_generation,omitempty"`
 	OriginIndexSHA256 string `json:"origin_index_sha256,omitempty"`
 	OriginPkgSHA256   string `json:"origin_pkg_sha256,omitempty"`
+
+	// Build environment provenance for source builds.
+	BuildSandbox  string `json:"build_sandbox,omitempty"` // "bwrap" or "none"
+	BuildNetwork  string `json:"build_network,omitempty"` // "on" or "off"
+	BuildEnvHash  string `json:"build_env_hash,omitempty"`
+	BuildEnvCount int    `json:"build_env_count,omitempty"`
 }
 
 // Rec is one installed package record.

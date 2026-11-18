@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -39,6 +41,25 @@ func metaFromRecipe(r *recipe.Recipe, use []string) *pkgdb.Meta {
 	}
 }
 
+// buildEnvFingerprint hashes the installed package set visible to a source
+// build. It records the build environment without storing the full list.
+func buildEnvFingerprint(db pkgdb.DB) (string, int) {
+	refs, err := db.List()
+	if err != nil {
+		return "", 0
+	}
+	lines := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		rec, err := db.Get(ref.Name, ref.Slot)
+		if err != nil {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s-%s", ref.String(), rec.VersionString()))
+	}
+	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
+	return hex.EncodeToString(sum[:]), len(lines)
+}
+
 // recipeTreeOrigin finds the recipe tree root (parent of the category dir)
 // and returns its signed manifest provenance, when present.
 func recipeTreeOrigin(r *recipe.Recipe) (root, keyID string, generation int64) {
@@ -63,6 +84,9 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
+	}
+	if o.noSandbox {
+		cfg.SandboxMode = "off"
 	}
 	if err := requireRepos(cfg); err != nil {
 		return err
@@ -161,6 +185,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 				return err
 			}
 			phase("Built %s (%d files) in %s", label, len(res.Entries), elapsed(time.Since(start)))
+			res.BuildEnvHash, res.BuildEnvCount = buildEnvFingerprint(db)
 			if pkgPath, err := build.PackBinpkg(r, res, cfg.Cache, opts.Hash()); err != nil {
 				fmt.Fprintln(os.Stderr, "zpkg: binpkg pack failed:", err)
 			} else {
@@ -183,6 +208,16 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		meta.OriginGeneration = res.OriginGeneration
 		meta.OriginIndexSHA256 = res.OriginIndexSHA256
 		meta.OriginPkgSHA256 = res.OriginPkgSHA256
+		meta.BuildSandbox = res.Sandbox
+		if res.Sandbox != "" {
+			if res.Network {
+				meta.BuildNetwork = "on"
+			} else {
+				meta.BuildNetwork = "off"
+			}
+		}
+		meta.BuildEnvHash = res.BuildEnvHash
+		meta.BuildEnvCount = res.BuildEnvCount
 		if meta.Origin == "source" {
 			// The recipe tree itself may have been synced from a signed
 			// manifest; record that signer as the source provenance.

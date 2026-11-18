@@ -14,12 +14,14 @@ const usage = `zpkg - ZIGNOS package manager (v0.9)
 Usage:
   zpkg depends [-r] <pkg>...  print build order including dependencies;
                               -r/--reverse prints installed dependents
-  zpkg build [-f] <pkg>...    fetch, verify and build into a destroot (no install)
-  zpkg install [-f] [-p] [--asdeps] <pkg>...
+  zpkg build [-f] [--no-sandbox] <pkg>...
+                              fetch, verify and build into a destroot (no install)
+  zpkg install [-f] [-p] [--asdeps] [--no-sandbox] <pkg>...
                               build if needed, then install into ZPKG_ROOT
                               -f  rebuild/reinstall even if installed
                               -p  pretend: show what would happen
                               --asdeps  do not add the target to world
+                              --no-sandbox  build without bubblewrap isolation
   zpkg upgrade [-p] [--newuse] [pkg]...
                               upgrade world (or the named packages) to the
                               recipe versions; --newuse also rebuilds a
@@ -88,6 +90,13 @@ Environment:
                   signature is always rejected)
   ZPKG_ALLOW_EXPIRED=1   ignore signature expiry (recovery only; rollback
                   checks and signature verification still apply)
+  ZPKG_SANDBOX   auto (default), require or off. Package builds run under
+                  bubblewrap when available; auto warns and builds directly
+                  if bwrap is missing
+  ZPKG_BUILD_NET default 1. Set to 0 to run builds in a network namespace
+                  without connectivity (recipes can override with a
+                  build_network file)
+  ZPKG_BWRAP     bubblewrap executable (default: bwrap)
 
 World: packages you name on "install" are recorded in $ZPKG_DB/world and are
 what "upgrade" acts on. Dependencies are installed but not added to world.
@@ -103,10 +112,11 @@ Successful builds are also packed into $ZPKG_CACHE/binpkgs as
 
 // installOptions are the flags shared by install/build/upgrade.
 type installOptions struct {
-	force   bool
-	pretend bool
-	asdeps  bool
-	newuse  bool // upgrade: rebuild when effective USE flags changed
+	force     bool
+	pretend   bool
+	asdeps    bool
+	newuse    bool // upgrade: rebuild when effective USE flags changed
+	noSandbox bool
 }
 
 // parseInstallArgs separates flags from package names.
@@ -121,6 +131,8 @@ func parseInstallArgs(args []string) (targets []string, o installOptions) {
 			o.asdeps = true
 		case "--newuse":
 			o.newuse = true
+		case "--no-sandbox":
+			o.noSandbox = true
 		default:
 			targets = append(targets, a)
 		}

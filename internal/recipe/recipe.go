@@ -30,6 +30,11 @@ type Recipe struct {
 	Depends     []string // runtime dependencies
 	MakeDepends []string // build-only dependencies
 	Build       string   // path of the build script
+
+	// BuildNetwork overrides the global build network policy for this
+	// recipe. nil means "inherit"; false means "deny even if the global
+	// policy allows it".
+	BuildNetwork *bool
 }
 
 // FullVersion is the canonical "pkgver-rN" form.
@@ -108,6 +113,22 @@ func load(dir, name string) (*Recipe, error) {
 	}
 	if r.Conflicts, err = readLines(filepath.Join(dir, "conflicts"), true); err != nil {
 		return nil, err
+	}
+	if vals, err := readLines(filepath.Join(dir, "build_network"), true); err != nil {
+		return nil, err
+	} else if len(vals) > 1 {
+		return nil, fmt.Errorf("%s: build_network must be a single line", name)
+	} else if len(vals) == 1 {
+		switch strings.ToLower(vals[0]) {
+		case "1", "yes", "true", "on":
+			v := true
+			r.BuildNetwork = &v
+		case "0", "no", "false", "off":
+			v := false
+			r.BuildNetwork = &v
+		default:
+			return nil, fmt.Errorf("%s: build_network %q is not 0 or 1", name, vals[0])
+		}
 	}
 
 	r.Build = filepath.Join(dir, "build")

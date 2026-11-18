@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/studio-nosa-tech/zpkg/internal/options"
+	"github.com/studio-nosa-tech/zpkg/internal/sandbox"
 )
 
 // Config holds the runtime layout.
@@ -23,6 +24,10 @@ type Config struct {
 	TrustedKeys   string // directory of trusted *.pub signing keys
 	AllowUnsigned bool   // accept unsigned repository/recipe metadata (development)
 	AllowExpired  bool   // ignore signature expiry (recovery)
+
+	SandboxMode  string // auto | require | off
+	BuildNetwork bool   // allow network access during builds by default
+	BwrapPath    string // bubblewrap executable (default "bwrap")
 }
 
 // Load builds a Config from the ZPKG_* environment variables.
@@ -93,20 +98,52 @@ func Load() (Config, error) {
 	if cfg.AllowExpired, err = readSecurityBool(absRoot, "ZPKG_ALLOW_EXPIRED", "ALLOW_EXPIRED"); err != nil {
 		return Config{}, err
 	}
+	// Build sandbox policy: env wins over /etc/zpkg/sandbox.conf.
+	cfg.SandboxMode = os.Getenv("ZPKG_SANDBOX")
+	if cfg.SandboxMode == "" {
+		if cfg.SandboxMode, err = options.ReadVar(absRoot, "etc/zpkg/sandbox.conf", "SANDBOX"); err != nil {
+			return Config{}, err
+		}
+	}
+	if cfg.SandboxMode == "" {
+		cfg.SandboxMode = string(sandbox.ModeAuto)
+	}
+	if _, err := sandbox.ParseMode(cfg.SandboxMode); err != nil {
+		return Config{}, err
+	}
+	cfg.BuildNetwork, err = readConfBool(absRoot, "etc/zpkg/sandbox.conf", "ZPKG_BUILD_NET", "BUILD_NET", true)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.BwrapPath = os.Getenv("ZPKG_BWRAP")
+	if cfg.BwrapPath == "" {
+		if cfg.BwrapPath, err = options.ReadVar(absRoot, "etc/zpkg/sandbox.conf", "BWRAP"); err != nil {
+			return Config{}, err
+		}
+	}
+	if cfg.BwrapPath == "" {
+		cfg.BwrapPath = "bwrap"
+	}
 	return cfg, nil
 }
 
 func readSecurityBool(root, env, key string) (bool, error) {
+	return readConfBool(root, "etc/zpkg/security.conf", env, key, false)
+}
+
+func readConfBool(root, relPath, env, key string, def bool) (bool, error) {
 	v, ok := os.LookupEnv(env)
 	if !ok || v == "" {
 		var err error
-		v, err = options.ReadVar(root, "etc/zpkg/security.conf", key)
+		v, err = options.ReadVar(root, relPath, key)
 		if err != nil {
 			return false, err
 		}
 	}
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "", "0", "false", "no", "off":
+	case "":
+		return def, nil
+	case "0", "false", "no", "off":
 		return false, nil
 	case "1", "true", "yes", "on":
 		return true, nil

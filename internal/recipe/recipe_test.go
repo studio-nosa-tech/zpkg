@@ -41,3 +41,43 @@ func TestChecksumCountMismatch(t *testing.T) {
 		t.Fatal("expected checksum mismatch error")
 	}
 }
+
+func TestBuildNetwork(t *testing.T) {
+	dir := t.TempDir()
+	pkg := filepath.Join(dir, "net")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"version": "1.0\n",
+		"build":   "#!/bin/sh\n",
+	} {
+		if err := os.WriteFile(filepath.Join(pkg, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := Load([]string{dir}, "net")
+	if err != nil || r.BuildNetwork != nil {
+		t.Fatalf("default build_network = %v, %v", r.BuildNetwork, err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "build_network"), []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err = Load([]string{dir}, "net")
+	if err != nil || r.BuildNetwork == nil || *r.BuildNetwork {
+		t.Fatalf("build_network 0 = %v, %v", r.BuildNetwork, err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "build_network"), []byte("yes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err = Load([]string{dir}, "net")
+	if err != nil || r.BuildNetwork == nil || !*r.BuildNetwork {
+		t.Fatalf("build_network yes = %v, %v", r.BuildNetwork, err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "build_network"), []byte("maybe\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load([]string{dir}, "net"); err == nil {
+		t.Fatal("invalid build_network accepted")
+	}
+}
