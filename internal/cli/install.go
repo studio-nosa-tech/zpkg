@@ -2,8 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +14,7 @@ import (
 	"github.com/studio-nosa-tech/zpkg/internal/config"
 	"github.com/studio-nosa-tech/zpkg/internal/install"
 	"github.com/studio-nosa-tech/zpkg/internal/pkgdb"
+	"github.com/studio-nosa-tech/zpkg/internal/provenance"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 	"github.com/studio-nosa-tech/zpkg/internal/recipesig"
 	"github.com/studio-nosa-tech/zpkg/internal/world"
@@ -39,25 +38,6 @@ func metaFromRecipe(r *recipe.Recipe, use []string) *pkgdb.Meta {
 		Provides:  append([]string{}, r.Provides...),
 		Conflicts: append([]string{}, r.Conflicts...),
 	}
-}
-
-// buildEnvFingerprint hashes the installed package set visible to a source
-// build. It records the build environment without storing the full list.
-func buildEnvFingerprint(db pkgdb.DB) (string, int) {
-	refs, err := db.List()
-	if err != nil {
-		return "", 0
-	}
-	lines := make([]string, 0, len(refs))
-	for _, ref := range refs {
-		rec, err := db.Get(ref.Name, ref.Slot)
-		if err != nil {
-			continue
-		}
-		lines = append(lines, fmt.Sprintf("%s-%s", ref.String(), rec.VersionString()))
-	}
-	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
-	return hex.EncodeToString(sum[:]), len(lines)
 }
 
 // recipeTreeOrigin finds the recipe tree root (parent of the category dir)
@@ -128,7 +108,11 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		// slots). With force every named target is rebuilt and
 		// reinstalled; dependencies that are already present are still
 		// skipped so only the requested packages are replaced.
-		skip := installed[pkgdb.SlotKey(name, r.Slot)] && !(o.force && targetSet[name])
+		// --clean/--repro-check are explicit "build it now" requests even if
+		// the package is installed, because a cached binpkg would hide the
+		// source build they are meant to exercise.
+		explicitBuild := (o.clean || o.reproCheck) && targetSet[name]
+		skip := installed[pkgdb.SlotKey(name, r.Slot)] && !(o.force && targetSet[name]) && !explicitBuild
 		if skip {
 			phase("Skipping %s (already installed)", pkgLabel(r))
 			continue
@@ -166,40 +150,75 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		start := time.Now()
 		opts := cfg.Options.ForPackage(r.Name)
 
-		res := build.LoadBinpkg(r, cfg)
-		if res == nil {
-			// No local cache hit: try a configured binary package
-			// repository before falling back to a source build. Signature,
-			// rollback and digest failures are hard errors.
-			var repoErr error
-			res, repoErr = build.LoadRepoBinpkg(r, cfg)
-			if repoErr != nil {
-				return repoErr
+		var res *build.Result
+		// --clean and --repro-check require a fresh source build.
+		if !o.clean && !o.reproCheck {
+			res = build.LoadBinpkg(r, cfg)
+			if res == nil {
+				// No local cache hit: try a configured binary package
+				// repository before falling back to a source build. Signature,
+				// rollback and digest failures are hard errors.
+				var repoErr error
+				res, repoErr = build.LoadRepoBinpkg(r, cfg)
+				if repoErr != nil {
+					return repoErr
+				}
 			}
 		}
 		fromBinpkg := res != nil
+		reproChecked := false
 		if res == nil {
+			if o.clean || o.reproCheck {
+				if err := build.CleanWork(r, cfg); err != nil {
+					return err
+				}
+			}
 			phase("Building %s", label)
 			res, err = build.Run(r, cfg)
 			if err != nil {
 				return err
 			}
 			phase("Built %s (%d files) in %s", label, len(res.Entries), elapsed(time.Since(start)))
-			res.BuildEnvHash, res.BuildEnvCount = buildEnvFingerprint(db)
-			if pkgPath, err := build.PackBinpkg(r, res, cfg.Cache, opts.Hash()); err != nil {
+			if _, envHash, envCount := provenance.InstalledEnvironment(db); envCount > 0 {
+				res.BuildEnvHash, res.BuildEnvCount = envHash, envCount
+			}
+			if _, err := build.PackBinpkg(r, res, cfg.Cache, opts.Hash()); err != nil {
 				fmt.Fprintln(os.Stderr, "zpkg: binpkg pack failed:", err)
 			} else {
-				phase("Packed binpkg %s", pkgPath)
+				phase("Packed binpkg %s", res.ArtifactPath)
 			}
-		}
-		if !doInstall {
-			phase("Destroot %s", res.Destroot)
-			continue
-		}
-		if fromBinpkg {
-			phase("Installing (%d of %d) %s (binpkg)", i+1, len(jobs), label)
-		} else {
-			phase("Installing (%d of %d) %s", i+1, len(jobs), label)
+			if o.reproCheck {
+				firstHash := res.ArtifactSHA256
+				if err := build.CleanWork(r, cfg); err != nil {
+					return err
+				}
+				phase("Rebuilding %s for reproducibility check", label)
+				second, err := build.Run(r, cfg)
+				if err != nil {
+					return err
+				}
+				if _, envHash, envCount := provenance.InstalledEnvironment(db); envCount > 0 {
+					second.BuildEnvHash, second.BuildEnvCount = envHash, envCount
+				}
+				if _, err := build.PackBinpkg(r, second, cfg.Cache, opts.Hash()); err != nil {
+					return err
+				}
+				diffs := diffEntries(res.Entries, second.Entries)
+				if len(diffs) > 0 {
+					limit := len(diffs)
+					if limit > 20 {
+						limit = 20
+					}
+					return fmt.Errorf("%s: build is not reproducible (%d differences):\n  %s",
+						label, len(diffs), strings.Join(diffs[:limit], "\n  "))
+				}
+				phase("Reproducible: %s (manifest matches, artifact %s)", label, second.ArtifactSHA256)
+				if firstHash != second.ArtifactSHA256 {
+					fmt.Fprintf(os.Stderr, "zpkg: note: manifest matches but binpkg bytes differ (first %s, second %s)\n", firstHash, second.ArtifactSHA256)
+				}
+				res = second
+				reproChecked = true
+			}
 		}
 		meta := metaFromRecipe(r, opts.Use)
 		meta.Origin = res.OriginKind
@@ -227,6 +246,24 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 				meta.OriginGeneration = generation
 			}
 		}
+		info := provenanceForBuild(db, cfg, r, res, meta)
+		info.Build.ReproducibleCheck = reproChecked
+		if info.Build.Origin == "source" {
+			// Provenance and SBOM sidecars live next to the binary package
+			// for consumers that never install it.
+			if err := writeArtifactProvenance(cfg, res, info); err != nil {
+				fmt.Fprintln(os.Stderr, "zpkg: provenance write failed:", err)
+			}
+		}
+		if !doInstall {
+			phase("Destroot %s", res.Destroot)
+			continue
+		}
+		if fromBinpkg {
+			phase("Installing (%d of %d) %s (binpkg)", i+1, len(jobs), label)
+		} else {
+			phase("Installing (%d of %d) %s", i+1, len(jobs), label)
+		}
 		rec := &pkgdb.Rec{
 			Name:     r.Name,
 			Slot:     r.Slot,
@@ -237,6 +274,9 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		}
 		if err := install.Apply(rec, res.Destroot, cfg.Root, db); err != nil {
 			return err
+		}
+		if err := writeInstalledProvenance(cfg, db, r, info); err != nil {
+			fmt.Fprintln(os.Stderr, "zpkg: provenance write failed:", err)
 		}
 		// Only packages named on the command line (or the providers chosen
 		// for virtual targets) become world members; dependencies are

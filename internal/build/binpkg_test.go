@@ -1,10 +1,15 @@
 package build
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/studio-nosa-tech/zpkg/internal/hash"
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 	"github.com/studio-nosa-tech/zpkg/internal/source"
@@ -55,5 +60,73 @@ func TestPackBinpkgRoundtrip(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(tmp, "usr", "bin", "hello-link")); err != nil {
 		t.Fatal("symlink not restored:", err)
+	}
+}
+
+func TestPackBinpkgNormalizesTimestamps(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "usr", "share", "hello")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := manifest.FromRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &recipe.Recipe{Name: "hello", Version: "1.0.0"}
+	res := &Result{Recipe: r, Destroot: root, Entries: entries, SourceDateEpoch: 946684800}
+
+	cache := t.TempDir()
+	pkgPath, err := PackBinpkg(r, res, cache, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Unix(946684800, 0).UTC()
+	f, err := os.Open(pkgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gz.Header.ModTime.Equal(want) {
+		t.Fatalf("gzip mtime = %v, want %v", gz.Header.ModTime, want)
+	}
+	tr := tar.NewReader(gz)
+	seen := 0
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen++
+		if !hdr.ModTime.Equal(want) {
+			t.Errorf("%s: mtime = %v, want %v", hdr.Name, hdr.ModTime, want)
+		}
+		if !hdr.AccessTime.IsZero() || !hdr.ChangeTime.IsZero() {
+			t.Errorf("%s: access/change time not zeroed", hdr.Name)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("empty archive")
+	}
+	if res.ArtifactPath != pkgPath || res.ArtifactSize == 0 || len(res.ArtifactSHA256) != 64 {
+		t.Fatalf("artifact provenance = %+v", res)
+	}
+	sum, err := hash.File(pkgPath)
+	if err != nil || sum != res.ArtifactSHA256 {
+		t.Fatalf("artifact sha256 = %q, want %q (%v)", res.ArtifactSHA256, sum, err)
+	}
+	manSum, err := hash.File(filepath.Join(cache, "binpkgs", "hello-1.0.0.manifest"))
+	if err != nil || manSum != res.ManifestSHA256 {
+		t.Fatalf("manifest sha256 = %q, want %q (%v)", res.ManifestSHA256, manSum, err)
 	}
 }

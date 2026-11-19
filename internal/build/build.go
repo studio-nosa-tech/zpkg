@@ -4,6 +4,7 @@ package build
 import (
 	"archive/tar"
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -12,19 +13,21 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/studio-nosa-tech/zpkg/internal/config"
 	"github.com/studio-nosa-tech/zpkg/internal/hash"
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
+	"github.com/studio-nosa-tech/zpkg/internal/provenance"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 	"github.com/studio-nosa-tech/zpkg/internal/sandbox"
 	"github.com/studio-nosa-tech/zpkg/internal/source"
 )
 
-// pkgBase is the cache key for a recipe: name-version, plus -rN when the
+// PackageBase is the cache key for a recipe: name-version, plus -rN when the
 // recipe has a revision, plus a short options hash when USE/CFLAGS/MAKEOPTS
 // are set. Baking both in keeps builds with different inputs apart.
-func pkgBase(r *recipe.Recipe, optsHash string) string {
+func PackageBase(r *recipe.Recipe, optsHash string) string {
 	base := r.Name + "-" + r.Version
 	if r.Revision > 0 {
 		base += "-r" + strconv.Itoa(r.Revision)
@@ -55,6 +58,25 @@ type Result struct {
 	Network       bool
 	BuildEnvHash  string
 	BuildEnvCount int
+
+	// Reproducibility inputs and outputs for source builds.
+	RecipeDigest    string
+	Sources         []provenance.Source
+	SourceDateEpoch int64
+	Started         string // RFC3339, UTC
+	Finished        string
+	LogPath         string
+	LogSHA256       string
+	ArtifactPath    string
+	ArtifactSHA256  string
+	ArtifactSize    int64
+	ManifestSHA256  string
+}
+
+// CleanWork removes the build work directory (sources, destroot, HOME and
+// compiler caches) for one package.
+func CleanWork(r *recipe.Recipe, cfg config.Config) error {
+	return os.RemoveAll(filepath.Join(cfg.Cache, "build", PackageBase(r, cfg.Options.ForPackage(r.Name).Hash())))
 }
 
 func copyFile(src, dst string, perm os.FileMode) error {
@@ -94,14 +116,22 @@ func PackBinpkg(r *recipe.Recipe, res *Result, cacheDir, optsHash string) (strin
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	base := pkgBase(r, optsHash)
+	base := PackageBase(r, optsHash)
 	pkgPath := filepath.Join(dir, base+".pkg.tar.gz")
+
+	epoch := res.SourceDateEpoch
+	if epoch <= 0 {
+		epoch = provenance.DefaultSourceDateEpoch
+	}
+	epochTime := time.Unix(epoch, 0).UTC()
 
 	f, err := os.Create(pkgPath)
 	if err != nil {
 		return "", err
 	}
 	gzw := gzip.NewWriter(f)
+	// The gzip header otherwise embeds the current time.
+	gzw.Header.ModTime = epochTime
 	tw := tar.NewWriter(gzw)
 
 	for _, e := range res.Entries {
@@ -129,6 +159,11 @@ func PackBinpkg(r *recipe.Recipe, res *Result, cacheDir, optsHash string) (strin
 			hdr.Name = e.Path
 			hdr.Typeflag = tar.TypeReg
 		}
+		// Normalize timestamps; ownership, modes, contents and order stay
+		// exactly as the build produced them.
+		hdr.ModTime = epochTime
+		hdr.AccessTime = time.Time{}
+		hdr.ChangeTime = time.Time{}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return "", err
 		}
@@ -154,12 +189,31 @@ func PackBinpkg(r *recipe.Recipe, res *Result, cacheDir, optsHash string) (strin
 		return "", err
 	}
 
-	if err := manifest.Write(filepath.Join(dir, base+".manifest"), res.Entries); err != nil {
+	manifestPath := filepath.Join(dir, base+".manifest")
+	if err := manifest.Write(manifestPath, res.Entries); err != nil {
 		return "", err
 	}
 	if err := writeBinMeta(dir, base, r, optsHash, res); err != nil {
 		return "", err
 	}
+
+	// Record the artifact digests for provenance and SBOM generation.
+	info, err := os.Stat(pkgPath)
+	if err != nil {
+		return "", err
+	}
+	sum, err := hash.File(pkgPath)
+	if err != nil {
+		return "", err
+	}
+	manifestSum, err := hash.File(manifestPath)
+	if err != nil {
+		return "", err
+	}
+	res.ArtifactPath = pkgPath
+	res.ArtifactSHA256 = sum
+	res.ArtifactSize = info.Size()
+	res.ManifestSHA256 = manifestSum
 	return pkgPath, nil
 }
 
@@ -170,7 +224,7 @@ func LoadBinpkg(r *recipe.Recipe, cfg config.Config) *Result {
 		return nil
 	}
 	dir := filepath.Join(cfg.Cache, "binpkgs")
-	base := pkgBase(r, cfg.Options.ForPackage(r.Name).Hash())
+	base := PackageBase(r, cfg.Options.ForPackage(r.Name).Hash())
 	entries, err := manifest.Read(filepath.Join(dir, base+".manifest"))
 	if err != nil {
 		return nil
@@ -178,7 +232,7 @@ func LoadBinpkg(r *recipe.Recipe, cfg config.Config) *Result {
 	if _, err := os.Stat(filepath.Join(dir, base+".pkg.tar.gz")); err != nil {
 		return nil
 	}
-	tmp := filepath.Join(cfg.Cache, "build", r.Name, "binpkg")
+	tmp := filepath.Join(cfg.Cache, "build", base, "binpkg")
 	if err := os.RemoveAll(tmp); err != nil {
 		return nil
 	}
@@ -189,7 +243,7 @@ func LoadBinpkg(r *recipe.Recipe, cfg config.Config) *Result {
 		return nil
 	}
 	sum, _ := hash.File(filepath.Join(dir, base+".pkg.tar.gz"))
-	return &Result{
+	res := &Result{
 		Recipe:          r,
 		Destroot:        tmp,
 		Entries:         entries,
@@ -197,13 +251,36 @@ func LoadBinpkg(r *recipe.Recipe, cfg config.Config) *Result {
 		OriginRepo:      dir,
 		OriginPkgSHA256: sum,
 	}
+	if data, err := os.ReadFile(filepath.Join(dir, base+".meta.json")); err == nil {
+		var m BinMeta
+		if json.Unmarshal(data, &m) == nil {
+			res.Sandbox = m.Sandbox
+			res.Network = m.Network == "on"
+			res.BuildEnvHash = m.BuildEnvHash
+			res.BuildEnvCount = m.BuildEnvCount
+			res.RecipeDigest = m.RecipeDigest
+			res.SourceDateEpoch = m.SourceDateEpoch
+			res.ArtifactSHA256 = m.ArtifactSHA256
+			res.ArtifactSize = m.ArtifactSize
+			res.ManifestSHA256 = m.ManifestSHA256
+			res.LogSHA256 = m.LogSHA256
+		}
+	}
+	if res.ArtifactSHA256 == "" {
+		res.ArtifactSHA256 = sum
+	}
+	return res
 }
 
 // Run fetches, verifies and extracts sources, then executes the build script
 // with ZPKG_DESTROOT pointing at a fresh destroot. On success it returns the
-// destroot inventory.
+// destroot inventory. Build logs, source digests and artifact provenance are
+// recorded when enabled.
 func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
-	work := filepath.Join(cfg.Cache, "build", r.Name)
+	opts := cfg.Options.ForPackage(r.Name)
+	optsHash := opts.Hash()
+	base := PackageBase(r, optsHash)
+	work := filepath.Join(cfg.Cache, "build", base)
 	destroot := filepath.Join(work, "destroot")
 	src := filepath.Join(work, "src")
 	for _, d := range []string{destroot, src} {
@@ -215,14 +292,30 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 		}
 	}
 
+	var sources []provenance.Source
 	if len(r.Sources) > 0 {
 		var files []string
-		for _, u := range r.Sources {
+		for i, u := range r.Sources {
 			f, err := source.Fetch(u, cfg.Cache)
 			if err != nil {
 				return nil, err
 			}
 			files = append(files, f)
+			sum := ""
+			if i < len(r.Checksums) {
+				sum = r.Checksums[i]
+			}
+			size := int64(0)
+			if fi, err := os.Stat(f); err == nil {
+				size = fi.Size()
+			}
+			// The fragment is a cache-name hint, not part of the URL.
+			if j := strings.IndexByte(u, '#'); j >= 0 {
+				u = u[:j]
+			}
+			sources = append(sources, provenance.Source{
+				URL: u, File: filepath.Base(f), SHA256: sum, Size: size,
+			})
 		}
 		if err := source.Verify(files, r.Checksums); err != nil {
 			return nil, err
@@ -243,7 +336,6 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 		}
 	}
 
-	opts := cfg.Options.ForPackage(r.Name)
 	network := cfg.BuildNetwork
 	if r.BuildNetwork != nil {
 		network = *r.BuildNetwork
@@ -256,20 +348,27 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 		return nil, err
 	}
 	env := sandbox.Env(sandbox.EnvOptions{
-		Root:      cfg.Root,
-		WorkDir:   work,
-		CacheDir:  cfg.Cache,
-		Destroot:  destroot,
-		SourceDir: src,
-		RecipeDir: r.Dir,
-		Name:      r.Name,
-		Version:   r.Version,
-		Use:       strings.Join(opts.Use, " "),
-		CFlags:    opts.CFlags,
-		MakeOpts:  opts.MakeOpts,
-		Network:   network,
-		Sandboxed: isolated,
+		Root:            cfg.Root,
+		WorkDir:         work,
+		CacheDir:        cfg.Cache,
+		Destroot:        destroot,
+		SourceDir:       src,
+		RecipeDir:       r.Dir,
+		Name:            r.Name,
+		Version:         r.Version,
+		Use:             strings.Join(opts.Use, " "),
+		CFlags:          opts.CFlags,
+		MakeOpts:        opts.MakeOpts,
+		Network:         network,
+		Sandboxed:       isolated,
+		SourceDateEpoch: cfg.SourceDateEpoch,
 	})
+
+	digest, digestErr := provenance.RecipeDigest(r.Dir)
+	if digestErr != nil {
+		fmt.Fprintf(os.Stderr, "zpkg: warning: %s: recipe digest: %v\n", r.Name, digestErr)
+	}
+	started := time.Now().UTC()
 
 	var cmd *exec.Cmd
 	engine := "none"
@@ -289,17 +388,55 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 		// process itself bare avoids leaking host variables to it.
 		cmd.Env = []string{}
 	} else {
-		cmd = exec.Command("bash", r.Build)
+		script, args := sandbox.UmaskScript(r.Build)
+		cmd = exec.Command(script, args...)
 		cmd.Dir = src
 		cmd.Env = env
 	}
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		if isolated {
-			return nil, fmt.Errorf("%s: sandboxed build failed: %w (set ZPKG_SANDBOX=off to build without isolation)", r.Name, err)
+
+	logPath := ""
+	var logFile *os.File
+	if cfg.BuildLog {
+		logDir := filepath.Join(cfg.Cache, "logs")
+		if err := os.MkdirAll(logDir, 0o755); err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("%s: build script failed: %w", r.Name, err)
+		logPath = filepath.Join(logDir, base+".log")
+		logFile, err = os.Create(logPath)
+		if err != nil {
+			return nil, err
+		}
+		netState := "off"
+		if network {
+			netState = "on"
+		}
+		fmt.Fprintf(logFile, "zpkg build log\npackage: %s\nrecipe: %s\nrecipe_digest: %s\nsource_date_epoch: %d\nsandbox: %s\nnetwork: %s\nstarted: %s\nbuild_script: %s\n---\n",
+			base, r.Dir, digest, cfg.SourceDateEpoch, engine, netState,
+			started.Format(time.RFC3339), r.Build)
 	}
+	if logFile != nil {
+		mw := io.MultiWriter(os.Stdout, logFile)
+		cmd.Stdout, cmd.Stderr = mw, mw
+	} else {
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	}
+	runErr := cmd.Run()
+	if logFile != nil {
+		if err := logFile.Close(); err != nil && runErr == nil {
+			return nil, err
+		}
+	}
+	if runErr != nil {
+		hint := ""
+		if logPath != "" {
+			hint = " (build log: " + logPath + ")"
+		}
+		if isolated {
+			return nil, fmt.Errorf("%s: sandboxed build failed: %w%s (set ZPKG_SANDBOX=off to build without isolation)", r.Name, runErr, hint)
+		}
+		return nil, fmt.Errorf("%s: build script failed: %w%s", r.Name, runErr, hint)
+	}
+	finished := time.Now().UTC()
 
 	entries, err := manifest.FromRoot(destroot)
 	if err != nil {
@@ -308,9 +445,20 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("%s: build script produced no files in destroot", r.Name)
 	}
+	logSum := ""
+	if logPath != "" {
+		logSum, _ = hash.File(logPath)
+	}
 	return &Result{
 		Recipe: r, Destroot: destroot, Entries: entries, OriginKind: "source",
 		Sandbox: engine, Network: network,
+		RecipeDigest:    digest,
+		Sources:         sources,
+		SourceDateEpoch: cfg.SourceDateEpoch,
+		Started:         started.Format(time.RFC3339),
+		Finished:        finished.Format(time.RFC3339),
+		LogPath:         logPath,
+		LogSHA256:       logSum,
 	}, nil
 }
 

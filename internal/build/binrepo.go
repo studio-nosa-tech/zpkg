@@ -54,6 +54,14 @@ type BinMeta struct {
 	Network       string `json:"network,omitempty"`
 	BuildEnvHash  string `json:"build_env_hash,omitempty"`
 	BuildEnvCount int    `json:"build_env_count,omitempty"`
+
+	// Reproducibility provenance for a source build.
+	RecipeDigest    string `json:"recipe_digest,omitempty"`
+	SourceDateEpoch int64  `json:"source_date_epoch,omitempty"`
+	ArtifactSHA256  string `json:"artifact_sha256,omitempty"`
+	ArtifactSize    int64  `json:"artifact_size,omitempty"`
+	ManifestSHA256  string `json:"manifest_sha256,omitempty"`
+	LogSHA256       string `json:"log_sha256,omitempty"`
 }
 
 const binMetaSchema = 1
@@ -84,6 +92,12 @@ func writeBinMeta(dir, base string, r *recipe.Recipe, optsHash string, res *Resu
 		}
 		m.BuildEnvHash = res.BuildEnvHash
 		m.BuildEnvCount = res.BuildEnvCount
+		m.RecipeDigest = res.RecipeDigest
+		m.SourceDateEpoch = res.SourceDateEpoch
+		m.ArtifactSHA256 = res.ArtifactSHA256
+		m.ArtifactSize = res.ArtifactSize
+		m.ManifestSHA256 = res.ManifestSHA256
+		m.LogSHA256 = res.LogSHA256
 	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -566,7 +580,7 @@ func loadRepoBinpkgImpl(r *recipe.Recipe, binRepo, cacheDir, optsHash string, cf
 		if err != nil {
 			return nil, err
 		}
-		tmp := filepath.Join(cacheDir, "build", r.Name, "repo")
+		tmp := filepath.Join(cacheDir, "build", PackageBase(r, optsHash), "repo")
 		if err := os.RemoveAll(tmp); err != nil {
 			return nil, err
 		}
@@ -586,6 +600,9 @@ func loadRepoBinpkgImpl(r *recipe.Recipe, binRepo, cacheDir, optsHash string, cf
 			OriginGeneration:  idx.Generation,
 			OriginIndexSHA256: sha256Hex(indexData),
 			OriginPkgSHA256:   e.Sha256,
+			ArtifactSHA256:    e.Sha256,
+			ArtifactSize:      e.Size,
+			ManifestSHA256:    e.ManifestSha256,
 		}, nil
 	}
 	return nil, nil

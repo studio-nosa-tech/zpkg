@@ -88,7 +88,7 @@ func TestArgs(t *testing.T) {
 		{"--setenv", "ZPKG_NAME", "foo"},
 		{"--cap-drop", "ALL"},
 		{"--cap-add", "CAP_CHOWN"},
-		{"--", "/bin/bash", "/usr/share/zignos/recipes/core/foo/build"},
+		{"--", "/bin/bash", "-c", umaskWrapper, "/bin/bash", "/usr/share/zignos/recipes/core/foo/build"},
 	} {
 		if !containsSeq(args, seq) {
 			t.Errorf("args missing %v\nargs: %v", seq, args)
@@ -110,13 +110,16 @@ func TestEnv(t *testing.T) {
 	env := Env(EnvOptions{
 		Root: "/", WorkDir: "/work", CacheDir: "/cache", Destroot: "/work/destroot",
 		SourceDir: "/work/src", RecipeDir: "/recipe", Name: "foo", Version: "1",
-		Network: false, Sandboxed: true,
+		Network: false, Sandboxed: true, SourceDateEpoch: 946684800,
 	})
 	joined := strings.Join(env, "\n")
 	for _, want := range []string{
 		"HOME=/work/home", "GOCACHE=/work/gocache", "GOPATH=/work/gopath",
 		"ZPKG_SANDBOX=bwrap", "ZPKG_BUILD_NET=0", "GOPROXY=off",
 		"https_proxy=http://proxy.example:3128", "ZPKG_ROOT=/",
+		"SOURCE_DATE_EPOCH=946684800", "PYTHONHASHSEED=0",
+		"KBUILD_BUILD_TIMESTAMP=Sat Jan  1 00:00:00 UTC 2000",
+		"KBUILD_BUILD_USER=zignos", "KBUILD_BUILD_HOST=zignos-build",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("env missing %q\n%s", want, joined)

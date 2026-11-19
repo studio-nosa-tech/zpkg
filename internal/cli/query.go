@@ -8,6 +8,7 @@ import (
 
 	"github.com/studio-nosa-tech/zpkg/internal/config"
 	"github.com/studio-nosa-tech/zpkg/internal/pkgdb"
+	"github.com/studio-nosa-tech/zpkg/internal/provenance"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 )
 
@@ -134,6 +135,26 @@ func cmdInfo(names []string) error {
 						}
 					}
 					fmt.Println(line)
+				}
+				recordDir := filepath.Join(db.Dir, pkgdb.SlotKey(rec.Name, rec.Slot))
+				if info, err := provenance.Read(filepath.Join(recordDir, "provenance.json")); err == nil {
+					if info.Recipe.Digest != "" {
+						digest := info.Recipe.Digest
+						if len(digest) > 12 {
+							digest = digest[:12] + "..."
+						}
+						line := "  provenance: recipe " + digest
+						if info.Build.SourceDateEpoch > 0 {
+							line += fmt.Sprintf(", source_date_epoch %d", info.Build.SourceDateEpoch)
+						}
+						fmt.Println(line)
+					}
+					if info.Log.Path != "" {
+						fmt.Printf("  build log: %s\n", info.Log.Path)
+					}
+				}
+				if fileExists(filepath.Join(recordDir, "sbom.json")) {
+					fmt.Println("  sbom: SPDX 2.3")
 				}
 			}
 		} else {

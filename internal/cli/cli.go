@@ -14,14 +14,18 @@ const usage = `zpkg - ZIGNOS package manager (v0.9)
 Usage:
   zpkg depends [-r] <pkg>...  print build order including dependencies;
                               -r/--reverse prints installed dependents
-  zpkg build [-f] [--no-sandbox] <pkg>...
+  zpkg build [-f] [--no-sandbox] [--clean] [--repro-check] <pkg>...
                               fetch, verify and build into a destroot (no install)
-  zpkg install [-f] [-p] [--asdeps] [--no-sandbox] <pkg>...
+                              --clean  remove the build work dir first
+                              --repro-check  build twice and compare manifests
+  zpkg install [-f] [-p] [--asdeps] [--no-sandbox] [--clean] [--repro-check] <pkg>...
                               build if needed, then install into ZPKG_ROOT
                               -f  rebuild/reinstall even if installed
                               -p  pretend: show what would happen
                               --asdeps  do not add the target to world
                               --no-sandbox  build without bubblewrap isolation
+                              --clean  remove the build work dir first
+                              --repro-check  build twice and compare manifests
   zpkg upgrade [-p] [--newuse] [pkg]...
                               upgrade world (or the named packages) to the
                               recipe versions; --newuse also rebuilds a
@@ -62,6 +66,11 @@ Usage:
   zpkg use [flag | -flag]...  show or edit /etc/zpkg/use.conf (USE flags)
   zpkg use --package <pkg> [flag | -flag]...
                               show or edit the package's line in package.use
+  zpkg provenance <pkg>...    show the recorded build provenance (JSON)
+  zpkg sbom <pkg>...          show a package's SPDX 2.3 SBOM
+  zpkg sbom --system [-o <file>]
+                              SPDX 2.3 SBOM of every installed package
+  zpkg log [-p] <pkg>...      print a package's build log; -p prints its path
   zpkg recover                roll back / complete an interrupted transaction
 
 Environment:
@@ -97,6 +106,13 @@ Environment:
                   without connectivity (recipes can override with a
                   build_network file)
   ZPKG_BWRAP     bubblewrap executable (default: bwrap)
+  SOURCE_DATE_EPOCH  fixed build timestamp (default 946684800 = 2000-01-01);
+                  ZPKG_SOURCE_DATE_EPOCH overrides, then SOURCE_DATE_EPOCH,
+                  then SOURCE_DATE_EPOCH= in /etc/zpkg/build.conf
+  ZPKG_BUILD_LOG  default 1. Set to 0 to stop writing build logs to
+                  $ZPKG_CACHE/logs (BUILD_LOG= in /etc/zpkg/build.conf)
+  ZPKG_SBOM      default 1. Set to 0 to skip SPDX SBOM generation
+                  (SBOM= in /etc/zpkg/build.conf)
 
 World: packages you name on "install" are recorded in $ZPKG_DB/world and are
 what "upgrade" acts on. Dependencies are installed but not added to world.
@@ -112,11 +128,13 @@ Successful builds are also packed into $ZPKG_CACHE/binpkgs as
 
 // installOptions are the flags shared by install/build/upgrade.
 type installOptions struct {
-	force     bool
-	pretend   bool
-	asdeps    bool
-	newuse    bool // upgrade: rebuild when effective USE flags changed
-	noSandbox bool
+	force      bool
+	pretend    bool
+	asdeps     bool
+	newuse     bool // upgrade: rebuild when effective USE flags changed
+	noSandbox  bool
+	clean      bool // remove the build work directory before building
+	reproCheck bool // build twice and compare the destroot manifests
 }
 
 // parseInstallArgs separates flags from package names.
@@ -133,6 +151,10 @@ func parseInstallArgs(args []string) (targets []string, o installOptions) {
 			o.newuse = true
 		case "--no-sandbox":
 			o.noSandbox = true
+		case "--clean":
+			o.clean = true
+		case "--repro-check":
+			o.reproCheck = true
 		default:
 			targets = append(targets, a)
 		}
@@ -176,6 +198,12 @@ func Run(args []string) error {
 		return withArgs(cmd, rest, cmdSearch)
 	case "use":
 		return cmdUse(rest)
+	case "provenance":
+		return withArgs(cmd, rest, cmdProvenance)
+	case "sbom":
+		return cmdSBOM(rest)
+	case "log":
+		return cmdLog(rest)
 	case "recover":
 		return cmdRecover()
 	case "mkindex":

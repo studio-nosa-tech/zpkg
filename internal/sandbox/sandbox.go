@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Mode is the configured sandbox policy.
@@ -173,8 +174,18 @@ func Args(o Options) []string {
 		"--cap-add", "CAP_FSETID",
 		"--cap-add", "CAP_SYS_CHROOT",
 	)
-	args = append(args, "--", "/bin/bash", o.BuildScript)
+	args = append(args, "--", "/bin/bash", "-c", umaskWrapper, "/bin/bash", o.BuildScript)
 	return args
+}
+
+// umaskWrapper runs a recipe build script with a fixed umask. $0 is the
+// shell to re-exec (so Windows dev hosts can use "bash" from PATH while the
+// sandbox uses /bin/bash) and "$@" is the build script.
+const umaskWrapper = `umask 022; exec "$0" "$@"`
+
+// UmaskScript is the equivalent wrapper for unsandboxed builds.
+func UmaskScript(script string) (name string, args []string) {
+	return "bash", []string{"-c", umaskWrapper, "bash", script}
 }
 
 // EnvOptions describes the sanitized environment for a build.
@@ -192,6 +203,9 @@ type EnvOptions struct {
 	MakeOpts  string
 	Network   bool
 	Sandboxed bool
+	// SourceDateEpoch is the fixed timestamp exposed to the build. Zero
+	// leaves SOURCE_DATE_EPOCH and the KBUILD_* variables unset.
+	SourceDateEpoch int64
 }
 
 // Env builds the minimal environment passed to the build. Host secrets and
@@ -223,6 +237,17 @@ func Env(o EnvOptions) []string {
 		"ZPKG_USE=" + o.Use,
 		"ZPKG_CFLAGS=" + o.CFlags,
 		"ZPKG_MAKEOPTS=" + o.MakeOpts,
+		"PYTHONHASHSEED=0",
+	}
+	if o.SourceDateEpoch > 0 {
+		env = append(env,
+			"SOURCE_DATE_EPOCH="+itoa64(o.SourceDateEpoch),
+			// The kernel embeds UTS_VERSION from these variables; pinning
+			// them keeps uname -v and the build ID stable.
+			"KBUILD_BUILD_TIMESTAMP="+time.Unix(o.SourceDateEpoch, 0).UTC().Format("Mon Jan _2 15:04:05 UTC 2006"),
+			"KBUILD_BUILD_USER=zignos",
+			"KBUILD_BUILD_HOST=zignos-build",
+		)
 	}
 	if o.Sandboxed {
 		env = append(env, "ZPKG_SANDBOX=bwrap")
@@ -253,4 +278,18 @@ func PrepareWork(work string) error {
 		}
 	}
 	return nil
+}
+
+func itoa64(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }

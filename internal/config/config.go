@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/studio-nosa-tech/zpkg/internal/options"
+	"github.com/studio-nosa-tech/zpkg/internal/provenance"
 	"github.com/studio-nosa-tech/zpkg/internal/sandbox"
 )
 
@@ -28,6 +30,10 @@ type Config struct {
 	SandboxMode  string // auto | require | off
 	BuildNetwork bool   // allow network access during builds by default
 	BwrapPath    string // bubblewrap executable (default "bwrap")
+
+	SourceDateEpoch int64 // fixed timestamp for reproducible artifacts
+	BuildLog        bool  // persist build logs under $ZPKG_CACHE/logs
+	SBOM            bool  // write SPDX SBOMs next to artifacts and DB records
 }
 
 // Load builds a Config from the ZPKG_* environment variables.
@@ -124,7 +130,41 @@ func Load() (Config, error) {
 	if cfg.BwrapPath == "" {
 		cfg.BwrapPath = "bwrap"
 	}
+	// Reproducibility settings: env, then /etc/zpkg/build.conf.
+	if cfg.SourceDateEpoch, err = readSourceDateEpoch(absRoot); err != nil {
+		return Config{}, err
+	}
+	if cfg.BuildLog, err = readConfBool(absRoot, "etc/zpkg/build.conf", "ZPKG_BUILD_LOG", "BUILD_LOG", true); err != nil {
+		return Config{}, err
+	}
+	if cfg.SBOM, err = readConfBool(absRoot, "etc/zpkg/build.conf", "ZPKG_SBOM", "SBOM", true); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+// readSourceDateEpoch resolves the fixed build timestamp. ZPKG_SOURCE_DATE_EPOCH
+// wins over the standard SOURCE_DATE_EPOCH, which wins over build.conf.
+func readSourceDateEpoch(root string) (int64, error) {
+	v := os.Getenv("ZPKG_SOURCE_DATE_EPOCH")
+	if v == "" {
+		v = os.Getenv("SOURCE_DATE_EPOCH")
+	}
+	if v == "" {
+		var err error
+		v, err = options.ReadVar(root, "etc/zpkg/build.conf", "SOURCE_DATE_EPOCH")
+		if err != nil {
+			return 0, err
+		}
+	}
+	if strings.TrimSpace(v) == "" {
+		return provenance.DefaultSourceDateEpoch, nil
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("SOURCE_DATE_EPOCH=%q: expected a non-negative Unix timestamp", v)
+	}
+	return n, nil
 }
 
 func readSecurityBool(root, env, key string) (bool, error) {

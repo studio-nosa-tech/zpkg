@@ -53,8 +53,8 @@ Total: 2 packages (1 target, 1 dependency)
 | コマンド | 動作 |
 |---|---|
 | `depends [-r] <pkg>...` | 依存(と makedepends)を含むビルド順。`-r` はインストール済みの逆依存を表示 |
-| `build [-f] [--no-sandbox] <pkg>...` | fetch → 検証 → destroot まで(インストールしない)。build は既定で bubblewrap 内 |
-| `install [-f] [-p] [--asdeps] [--no-sandbox] <pkg>...` | 必要ならビルドして `$ZPKG_ROOT` へ。`-p` は pretend、`--asdeps` は world に追加しない |
+| `build [-f] [--no-sandbox] [--clean] [--repro-check] <pkg>...` | fetch → 検証 → destroot まで(インストールしない)。build は既定で bubblewrap 内。`--clean` は work を削除、`--repro-check` は 2 回ビルドして manifest 比較 |
+| `install [-f] [-p] [--asdeps] [--no-sandbox] [--clean] [--repro-check] <pkg>...` | 必要ならビルドして `$ZPKG_ROOT` へ。`-p` は pretend、`--asdeps` は world に追加しない。`--clean` / `--repro-check` はキャッシュを使わずソースビルド |
 | `upgrade [-p] [--newuse] [pkg]...` | world(または指定 pkg)をレシピの版へ。`--newuse` は USE 変更時に再ビルド |
 | `remove [-f] <pkg>...` | 全スロットを削除し world から除去。逆依存がある場合は停止(`-f` で強制) |
 | `list` | インストール済み一覧(`name@slot` 表示) |
@@ -71,11 +71,15 @@ Total: 2 packages (1 target, 1 dependency)
 | `sign --key <private> <file>...` | `<file>.sig`(detached Ed25519 署名)を生成 |
 | `verify <file>...` | `<file>.sig` を trusted.d の鍵で検証 |
 | `sign-recipes --key <private> [--generation N] [--expires ...] [dir]` | レシピツリーの `recipes.manifest` と署名を生成 |
+| `provenance <pkg>...` | 記録済みのビルド来歴(JSON)を表示 |
+| `sbom <pkg>...` / `sbom --system [-o <file>]` | SPDX 2.3 SBOM の表示・出力 |
+| `log [-p] <pkg>...` | ビルドログの表示(`-p` はパスだけ) |
 | `recover` | 中断したトランザクションの修復(install はロールバック、remove は完了) |
 
 `-f` は「インストール済みでも処理する」フラグで、**binpkg キャッシュは無視しない**。
 同じ version+revision+実効 USE の binpkg があればそれを使うので、レシピ内容を
-変えたときは `revision` を上げる。
+変えたときは `revision` を上げる。`--clean` / `--repro-check` は明示的にソース
+ビルドするため、キャッシュ済み binpkg を使わない。
 
 ## レシピツリーの更新
 
@@ -246,6 +250,75 @@ chroot するため、stage3 のディレクトリ chroot でもサンドボッ�
 サンドボックス内に見えるのはインストール済みシステム全体(読み取り専用)で、
 makedepends だけの最小ルートではない。
 
+## 再現可能なビルド
+
+build は `SOURCE_DATE_EPOCH`(既定 `946684800` = 2000-01-01T00:00:00Z)を
+基準に実行される。`ZPKG_SOURCE_DATE_EPOCH` → `SOURCE_DATE_EPOCH` →
+`/etc/zpkg/build.conf` の順で上書きできる。build 環境には
+`SOURCE_DATE_EPOCH`、`KBUILD_BUILD_TIMESTAMP` / `KBUILD_BUILD_USER=zignos` /
+`KBUILD_BUILD_HOST=zignos-build`、`PYTHONHASHSEED=0` が渡り、レシピは
+`umask 022` の wrapper 経由で実行される。
+
+binpkg の gzip header と tar 全エントリの mtime は SOURCE_DATE_EPOCH に固定
+される(所有者・モード・内容・順序はビルドのまま)。work ディレクトリは
+`$ZPKG_CACHE/build/<name>-<version>[-rN][-opts]`。
+
+### ビルドログ
+
+既定で `$ZPKG_CACHE/logs/<base>.log` に stdout/stderr を保存する。ヘッダには
+package / recipe / recipe digest / epoch / sandbox / network / started /
+build script が入り、失敗したビルドも残る。`BUILD_LOG=0` または
+`ZPKG_BUILD_LOG=0` で無効。`zpkg log <pkg>` で表示、`-p` でパスだけ表示する。
+
+### provenance
+
+ビルド・インストール時に `provenance.json`(schema 1)を生成する。
+
+- `$ZPKG_DB/<name>[@slot]/provenance.json`
+- `$ZPKG_CACHE/binpkgs/<base>.build.json`
+
+記録内容: package / recipe(repo・dir・全ファイルの digest・署名 key/generation)/
+sources(URL・file・sha256・size)/ build(USE・CFLAGS・MAKEOPTS・sandbox・
+network・SOURCE_DATE_EPOCH・started/finished・origin)/ toolchain
+(gcc/binutils/glibc/make/bash/go/zpkg/bubblewrap)/ dependencies /
+build_dependencies / environment(インストール済み全パッケージと hash)/
+artifact(filename・sha256・size・manifest_sha256)/ log(path・sha256)。
+
+```sh
+zpkg provenance zlib
+```
+
+binpkg / binrepo からのインストールは、判明する範囲(origin、artifact hash、
+sidecar の recipe digest、ビルド環境)だけを記録する。
+
+### SPDX 2.3 SBOM
+
+- `$ZPKG_DB/<name>[@slot]/sbom.json`
+- `$ZPKG_CACHE/binpkgs/<base>.spdx.json`
+
+target に artifact の SHA-256 と purl(`pkg:generic/zignos/<name>@<version>`)、
+runtime 依存に `DEPENDS_ON`、makedepends に `BUILD_DEPENDENCY_OF`、toolchain に
+`BUILD_TOOL_OF` を張る。system SBOM は合成 `SPDXRef-System-zignos` に全パッケージの
+`CONTAINS` を持つ。ライセンスはレシピが持たないため `NOASSERTION`。
+
+```sh
+zpkg sbom zlib
+zpkg sbom --system -o system.spdx.json
+```
+
+`SBOM=0` / `ZPKG_SBOM=0` で生成を無効にできる。
+
+### 再現性検証
+
+```sh
+zpkg build --repro-check <pkg>
+```
+
+2 回ビルドし、destroot の manifest(Kind / Path / Hash / Link)を比較する。
+差分は path ごとに表示して失敗し、一致すれば
+`Reproducible: <pkg> (manifest matches, artifact <sha256>)` を表示する。
+binpkg のバイト一致は保証せず、hash が異なる場合は注記する。
+
 ## 環境変数
 
 | 変数 | 既定 | 内容 |
@@ -265,6 +338,9 @@ makedepends だけの最小ルートではない。
 | `ZPKG_BUILD_NET` | `1` | `0` でビルドを network namespace 内に隔離 |
 | `ZPKG_BWRAP` | `bwrap` | bubblewrap の実行ファイル |
 | `ZPKG_USE` / `ZPKG_CFLAGS` / `ZPKG_MAKEOPTS` | ファイル | USE とビルドフラグの上書き(空文字も「明示的に空」) |
+| `ZPKG_SOURCE_DATE_EPOCH` | `946684800` | 固定ビルド時刻。標準の `SOURCE_DATE_EPOCH` も受け付ける |
+| `ZPKG_BUILD_LOG` | `1` | `0` でビルドログを保存しない |
+| `ZPKG_SBOM` | `1` | `0` で SPDX SBOM を生成しない |
 
 設定ファイル(ターゲットルート配下):
 
@@ -275,6 +351,7 @@ makedepends だけの最小ルートではない。
 - `/etc/zpkg/sync.conf` — `RECIPEURL=`(`zpkg sync` の既定ソース)
 - `/etc/zpkg/security.conf` — `TRUSTED_KEYS=` / `ALLOW_UNSIGNED=` / `ALLOW_EXPIRED=`
 - `/etc/zpkg/sandbox.conf` — `SANDBOX=` / `BUILD_NET=` / `BWRAP=`
+- `/etc/zpkg/build.conf` — `SOURCE_DATE_EPOCH=` / `BUILD_LOG=` / `SBOM=`
 
 ## レシピ形式(ディレクトリ型・KISS 式)
 
@@ -299,7 +376,9 @@ makedepends だけの最小ルートではない。
 成果物を置く契約(`make DESTDIR="$ZPKG_DESTROOT" install` 等)。渡される環境:
 `ZPKG_NAME` / `ZPKG_VERSION` / `ZPKG_RECIPE_DIR` / `ZPKG_ROOT` / `ZPKG_CACHE` /
 `ZPKG_DESTROOT` / `ZPKG_SRC` / `ZPKG_WORKDIR` / `ZPKG_USE` / `ZPKG_CFLAGS` /
-`ZPKG_MAKEOPTS` / `ZPKG_SANDBOX` / `ZPKG_BUILD_NET`。
+`ZPKG_MAKEOPTS` / `ZPKG_SANDBOX` / `ZPKG_BUILD_NET`。再現性のため
+`SOURCE_DATE_EPOCH` / `KBUILD_BUILD_TIMESTAMP` / `KBUILD_BUILD_USER` /
+`KBUILD_BUILD_HOST` / `PYTHONHASHSEED=0` も渡す。レシピは `umask 022` で実行される。
 
 - `sources` の URL に `#ファイル名` を付けるとキャッシュ名を指定できる
 - `.patch` / `.diff` は展開されず `$ZPKG_SRC` に置かれる
@@ -354,6 +433,10 @@ makedepends だけの最小ルートではない。
   PID/IPC/UTS namespace、capability 制限、環境変数 allowlist、任意の
   network namespace 分離。`auto` / `require` / `off` と `--no-sandbox`。
   build env の fingerprint を `meta.json` に記録
+- 再現可能ビルド: `SOURCE_DATE_EPOCH`(既定 2000-01-01)と KBUILD 変数、
+  `umask 022`、binpkg の tar/gzip mtime 正規化、work dir のパッケージ単位化、
+  ビルドログ(`$ZPKG_CACHE/logs/`)、`provenance.json`、SPDX 2.3 SBOM、
+  `--repro-check`(2 回ビルドの manifest 比較)
 - slots: `name@slot` レコード。別スロットとのファイル重複はエラー
 - world / upgrade: 明示インストール集合の追跡、`--newuse`、upgrade 時の
   不要ファイル削除(内容一致時のみ、ロールバック可能)
@@ -376,5 +459,10 @@ makedepends だけの最小ルートではない。
   ソース tarball の展開、CPU/メモリ/ディスクの resource limit は対象外
 - サンドボックス内に見えるのはインストール済みシステム全体(読み取り専用)。
   makedepends だけの最小ビルドルートは未実装
+- `--repro-check` は destroot manifest の比較で、tar のバイト一致・所有者・
+  mtime は保証しない。上流が時刻・ホスト名・パスを埋め込むビルドは
+  SOURCE_DATE_EPOCH だけでは一致しないことがある
+- SBOM のライセンス / copyright はレシピに情報がないため `NOASSERTION`
+- ビルドログは cache 配下なので、cache を消すと失われる
 - 素の `chroot` では bwrap の `pivot_root` が使えないため、`auto` は警告して
   直接ビルドにフォールバックする。stage3 では `zignos-enter.sh` を使う
