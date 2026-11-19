@@ -145,8 +145,8 @@ func TestPlanActionsDiffsWarningsAndOrphans(t *testing.T) {
 	if _, ok := orphanNames["olddep"]; !ok {
 		t.Errorf("olddep not orphaned: %+v", plan.Orphans)
 	}
-	if _, ok := orphanNames["extra"]; !ok {
-		t.Errorf("extra not orphaned: %+v", plan.Orphans)
+	if _, ok := orphanNames["extra"]; ok {
+		t.Errorf("unrelated installed package must not be orphaned: %+v", plan.Orphans)
 	}
 	for name := range orphanNames {
 		if !orphanNames[name].Prunable() {

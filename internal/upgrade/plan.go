@@ -184,8 +184,59 @@ func Build(cfg config.Config, db pkgdb.DB, targets []string, opts Options) (*Pla
 		}
 		plan.Entries = append(plan.Entries, e)
 	}
-	plan.Orphans = findOrphans(recs, closure, updatedDeps(plan.Entries, cfg))
+	plan.Orphans = findOrphans(recs, installedClosure(recs, targets), closure, updatedDeps(plan.Entries, cfg))
 	return plan, nil
+}
+
+// installedClosure walks the installed DB from the upgrade targets using the
+// dependencies recorded at install time. Orphans are only packages that
+// were required before this upgrade and are no longer required after it;
+// unrelated installed packages (for example base packages that were never
+// in world) must not be offered for pruning.
+func installedClosure(recs []*pkgdb.Rec, targets []string) map[string]bool {
+	byName := map[string]*pkgdb.Rec{}
+	providers := map[string][]string{}
+	for _, rec := range recs {
+		if rec.Slot == "0" {
+			byName[rec.Name] = rec
+		}
+		if rec.Meta == nil {
+			continue
+		}
+		for _, p := range rec.Meta.Provides {
+			if a, err := depspec.ParseProvided(p); err == nil && a.Name != "" {
+				providers[a.Name] = append(providers[a.Name], rec.Name)
+			}
+		}
+	}
+	seen := map[string]bool{}
+	queue := append([]string{}, targets...)
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		rec := byName[name]
+		if rec == nil {
+			for _, p := range providers[name] {
+				if rec = byName[p]; rec != nil {
+					break
+				}
+			}
+		}
+		if rec == nil || seen[rec.Name] {
+			continue
+		}
+		seen[rec.Name] = true
+		if rec.Meta == nil {
+			continue
+		}
+		for depName := range activeDeps(rec.Meta.Depends, rec.Meta.UseFlags) {
+			queue = append(queue, depName)
+		}
+		for depName := range activeDeps(rec.Meta.BuildDeps, rec.Meta.UseFlags) {
+			queue = append(queue, depName)
+		}
+	}
+	return seen
 }
 
 // updatedDeps returns the dependency names each planned package will have
@@ -352,14 +403,14 @@ func majorVersion(v string) string {
 	return v[i:j]
 }
 
-func findOrphans(recs []*pkgdb.Rec, closure map[string]bool, newDeps map[string]map[string]bool) []Orphan {
+func findOrphans(recs []*pkgdb.Rec, oldClosure, closure map[string]bool, newDeps map[string]map[string]bool) []Orphan {
 	byName := map[string][]string{}
 	for _, rec := range recs {
 		byName[rec.Name] = append(byName[rec.Name], rec.Slot)
 	}
 	var orphans []Orphan
 	for _, rec := range recs {
-		if rec.Slot != "0" || closure[rec.Name] || len(byName[rec.Name]) > 1 {
+		if rec.Slot != "0" || !oldClosure[rec.Name] || closure[rec.Name] || len(byName[rec.Name]) > 1 {
 			continue
 		}
 		// Virtual names this orphan satisfies. They are what dependents
