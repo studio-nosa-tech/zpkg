@@ -81,3 +81,34 @@ func TestBuildNetwork(t *testing.T) {
 		t.Fatal("invalid build_network accepted")
 	}
 }
+
+func TestUpgradeWarning(t *testing.T) {
+	dir := t.TempDir()
+	pkg := filepath.Join(dir, "warn")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"version": "1.0\n",
+		"build":   "#!/bin/sh\n",
+	} {
+		if err := os.WriteFile(filepath.Join(pkg, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := Load([]string{dir}, "warn")
+	if err != nil || r.UpgradeWarning != "" {
+		t.Fatalf("default warning = %q, %v", r.UpgradeWarning, err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "upgrade_warning"),
+		[]byte("rebuild all modules\ncheck /etc/foo.conf\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err = Load([]string{dir}, "warn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.UpgradeWarning != "rebuild all modules check /etc/foo.conf" {
+		t.Fatalf("warning = %q", r.UpgradeWarning)
+	}
+}

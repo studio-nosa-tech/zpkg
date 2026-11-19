@@ -30,6 +30,7 @@ type Meta struct {
 	Revision  int      `json:"revision"`
 	Slot      string   `json:"slot,omitempty"`
 	Repo      string   `json:"repo,omitempty"`
+	Channel   string   `json:"channel,omitempty"` // release channel used at install time
 	Arch      string   `json:"arch,omitempty"`
 	Installed string   `json:"installed,omitempty"` // RFC3339, UTC
 	UseFlags  []string `json:"useflags,omitempty"`

@@ -106,6 +106,9 @@ func cmdInfo(names []string) error {
 				if rec.Meta != nil && len(rec.Meta.UseFlags) > 0 {
 					fmt.Printf("  useflags: %s\n", joinDeps(rec.Meta.UseFlags))
 				}
+				if rec.Meta != nil && rec.Meta.Channel != "" {
+					fmt.Printf("  channel: %s\n", rec.Meta.Channel)
+				}
 				if rec.Meta != nil && rec.Meta.Origin != "" {
 					line := "  origin: " + rec.Meta.Origin
 					if rec.Meta.OriginRepo != "" {

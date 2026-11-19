@@ -18,7 +18,7 @@ func sampleInfo(name, version string) *provenance.Info {
 			SourceDateEpoch: provenance.DefaultSourceDateEpoch,
 			Sandbox:         "bwrap",
 			Network:         "on",
-			ZpkgVersion:     "0.1.0-r11",
+			ZpkgVersion:     "0.2.0",
 		},
 		Dependencies: []provenance.Component{{Name: "glibc", Version: "2.44"}},
 		BuildDeps:    []provenance.Component{{Name: "gcc", Version: "16.2.0"}},
@@ -88,7 +88,7 @@ func TestSystemDocument(t *testing.T) {
 	doc := SystemDocument([]*provenance.Info{
 		sampleInfo("hello", "1.0"),
 		sampleInfo("world", "2.0"),
-	}, "0.1.0-r11")
+	}, "0.2.0")
 	if len(doc.Packages) != 3 {
 		t.Fatalf("packages = %d", len(doc.Packages))
 	}

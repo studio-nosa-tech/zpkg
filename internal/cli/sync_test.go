@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,14 +75,15 @@ func TestScanRecipeTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.core != 1 || s.main != 1 || s.desktop != 1 || s.total() != 3 {
-		t.Fatalf("stats = %+v, want 1/1/1", s)
+	c := s.channels["legacy"]
+	if c.core != 1 || c.main != 1 || c.desktop != 1 || s.total() != 3 || !s.legacy {
+		t.Fatalf("stats = %+v, want legacy 1/1/1", s)
 	}
 	if err := os.MkdirAll(filepath.Join(root, "desktop", "not-a-recipe"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	s, err = scanRecipeTree(root)
-	if err != nil || s.desktop != 1 || s.total() != 3 {
+	if err != nil || s.channels["legacy"].desktop != 1 || s.total() != 3 {
 		t.Fatalf("stats with non-recipe dir = %+v, %v", s, err)
 	}
 	if _, err := scanRecipeTree(filepath.Join(root, "core")); err == nil {
@@ -100,7 +102,7 @@ func TestSyncRecipesDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.core != 1 || stats.main != 1 || stats.total() != 2 {
+	if c := stats.channels["legacy"]; c.core != 1 || c.main != 1 || stats.total() != 2 {
 		t.Fatalf("stats = %+v", stats)
 	}
 	if _, err := os.Stat(filepath.Join(dest, "core", "foo", "version")); err != nil {
@@ -155,6 +157,9 @@ func TestRecipePrefix(t *testing.T) {
 		{"./core/foo/version", "", true},
 		{"./usr/share/zignos/recipes/core/foo/version", "./usr/share/zignos/recipes", true},
 		{"repo-main/main/bar/version", "repo-main", true},
+		{"./usr/share/zignos/recipes/stable/core/foo/version", "./usr/share/zignos/recipes", true},
+		{"./usr/share/zignos/recipes/unstable/main/bar/version", "./usr/share/zignos/recipes", true},
+		{"testing/core/foo/version", "", true},
 		{"usr/share/zignos/recipes/README", "", false},
 	}
 	for _, c := range cases {
@@ -204,7 +209,7 @@ func TestSyncRecipesStage3Archive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.core != 1 || stats.main != 1 {
+	if c := stats.channels["legacy"]; c.core != 1 || c.main != 1 {
 		t.Fatalf("stats = %+v", stats)
 	}
 	if _, err := os.Stat(filepath.Join(dest, "core", "foo", "build")); err != nil {
@@ -248,7 +253,7 @@ func TestSyncRecipesURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.core != 1 || stats.main != 1 {
+	if c := stats.channels["legacy"]; c.core != 1 || c.main != 1 {
 		t.Fatalf("stats = %+v", stats)
 	}
 	if _, err := os.Stat(filepath.Join(dest, "main", "bar", "version")); err != nil {
@@ -351,5 +356,125 @@ func TestSyncRecipesSignedAndRollback(t *testing.T) {
 	}
 	if _, err := syncRecipes(cfg, bad, dest, true, true); err == nil {
 		t.Fatal("invalid signature accepted with --allow-unsigned")
+	}
+}
+
+func writeChannelRecipe(t *testing.T, root, channel, cat, name, version string) string {
+	t.Helper()
+	return writeRecipe(t, root, filepath.Join(channel, cat), name, version)
+}
+
+func TestScanRecipeTreeChannels(t *testing.T) {
+	root := t.TempDir()
+	writeChannelRecipe(t, root, "stable", "core", "foo", "1")
+	writeChannelRecipe(t, root, "stable", "main", "bar", "2")
+	writeChannelRecipe(t, root, "testing", "core", "foo", "2")
+	writeChannelRecipe(t, root, "testing", "main", "bar", "2")
+	s, err := scanRecipeTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.legacy || s.total() != 4 || s.channels["stable"].core != 1 || s.channels["testing"].core != 1 {
+		t.Fatalf("stats = %+v", s)
+	}
+	if !strings.Contains(s.summary(), "stable 1/1") || !strings.Contains(s.summary(), "testing 1/1") {
+		t.Fatalf("summary = %q", s.summary())
+	}
+
+	// A channel missing main/ is invalid.
+	bad := t.TempDir()
+	writeChannelRecipe(t, bad, "stable", "core", "foo", "1")
+	if _, err := scanRecipeTree(bad); err == nil {
+		t.Fatal("incomplete channel accepted")
+	}
+
+	// Mixing a flat tree and channel dirs is ambiguous.
+	mixed := t.TempDir()
+	writeRecipe(t, mixed, "core", "foo", "1")
+	writeRecipe(t, mixed, "main", "bar", "1")
+	writeChannelRecipe(t, mixed, "stable", "core", "baz", "1")
+	writeChannelRecipe(t, mixed, "stable", "main", "qux", "1")
+	if _, err := scanRecipeTree(mixed); err == nil {
+		t.Fatal("mixed layout accepted")
+	}
+}
+
+func TestSyncRecipesChannels(t *testing.T) {
+	src := t.TempDir()
+	writeChannelRecipe(t, src, "stable", "core", "foo", "1")
+	writeChannelRecipe(t, src, "stable", "main", "bar", "2")
+	writeChannelRecipe(t, src, "testing", "core", "foo", "3")
+	writeChannelRecipe(t, src, "testing", "main", "bar", "2")
+	dest := t.TempDir()
+	writeRecipe(t, dest, "core", "old", "0")
+	writeRecipe(t, dest, "main", "old2", "0")
+
+	stats, err := syncRecipes(testSyncConfig(t), src, dest, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.legacy || len(stats.channels) != 2 {
+		t.Fatalf("stats = %+v", stats)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "stable", "core", "foo", "version")); err != nil {
+		t.Fatalf("stable recipe missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "testing", "core", "foo", "version")); err != nil {
+		t.Fatalf("testing recipe missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "core", "old", "version")); !os.IsNotExist(err) {
+		t.Fatalf("flat tree survived: %v", err)
+	}
+}
+
+func TestSyncRecipesChannelArchive(t *testing.T) {
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("tar not available")
+	}
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "recipes.tar.gz")
+	f, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	add := func(name, body string, mode int64) {
+		t.Helper()
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("./usr/share/zignos/recipes/stable/core/foo/version", "1\n", 0o644)
+	add("./usr/share/zignos/recipes/stable/core/foo/build", "#!/bin/sh\n", 0o755)
+	add("./usr/share/zignos/recipes/stable/main/bar/version", "2\n", 0o644)
+	add("./usr/share/zignos/recipes/testing/core/foo/version", "3\n", 0o644)
+	add("./usr/share/zignos/recipes/testing/main/bar/version", "2\n", 0o644)
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	stats, err := syncRecipes(testSyncConfig(t), archive, dest, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.legacy || len(stats.channels) != 2 {
+		t.Fatalf("stats = %+v", stats)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "stable", "core", "foo", "build")); err != nil {
+		t.Fatalf("channel archive recipe missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "testing", "core", "foo", "version")); err != nil {
+		t.Fatalf("testing archive recipe missing: %v", err)
 	}
 }

@@ -28,7 +28,7 @@ func zpkgVersion(cfg config.Config) string {
 			return v
 		}
 	}
-	return "0.1.0-r11"
+	return Version
 }
 
 // depComponents resolves dependency atoms to installed name/version pairs.
@@ -86,7 +86,7 @@ func provenanceForBuild(db pkgdb.DB, cfg config.Config, r *recipe.Recipe, res *b
 			Slot: r.Slot, Arch: runtime.GOARCH,
 		},
 		Recipe: provenance.Recipe{
-			Repo: r.Repo, Dir: r.Dir, Digest: res.RecipeDigest,
+			Repo: r.Repo, Dir: r.Dir, Channel: cfg.Channel, Digest: res.RecipeDigest,
 			KeyID: meta.OriginKeyID, Generation: meta.OriginGeneration,
 		},
 		Sources: res.Sources,
@@ -120,7 +120,7 @@ func provenanceForBuild(db pkgdb.DB, cfg config.Config, r *recipe.Recipe, res *b
 		info.Toolchain = provenance.Toolchain(db)
 		info.Dependencies = depComponents(db, r.Depends, opts.Use)
 		info.BuildDeps = depComponents(db, r.MakeDepends, opts.Use)
-		root, keyID, generation := recipeTreeOrigin(r)
+		root, keyID, generation := recipeTreeOrigin(r, cfg)
 		if keyID != "" {
 			info.Recipe.KeyID = keyID
 			info.Recipe.Generation = generation

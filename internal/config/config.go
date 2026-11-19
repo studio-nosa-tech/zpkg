@@ -34,6 +34,48 @@ type Config struct {
 	SourceDateEpoch int64 // fixed timestamp for reproducible artifacts
 	BuildLog        bool  // persist build logs under $ZPKG_CACHE/logs
 	SBOM            bool  // write SPDX SBOMs next to artifacts and DB records
+
+	// Release channel selection. Channel is the effective channel; Source
+	// says where it came from ("env", "make.conf", "flag", "default").
+	Channel        string
+	ChannelSource  string
+	ReposExplicit  bool   // ZPKG_REPOS was set, so channel does not pick repos
+	RecipeRoot     string // $ZPKG_ROOT/usr/share/zignos/recipes
+	TreeRoot       string // tree that owns recipes.manifest (provenance)
+	ChannelMissing bool   // the selected channel is not present under RecipeRoot
+}
+
+// Channels are the supported release channels, most stable first.
+var Channels = []string{"stable", "testing", "unstable"}
+
+// ValidChannel reports whether ch is a supported release channel.
+func ValidChannel(ch string) bool {
+	for _, c := range Channels {
+		if ch == c {
+			return true
+		}
+	}
+	return false
+}
+
+// AvailableChannels lists the channels installed under a recipe root.
+func AvailableChannels(recipeRoot string) []string {
+	var out []string
+	for _, c := range Channels {
+		if isDir(filepath.Join(recipeRoot, c, "core")) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func isDir(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+func isCategory(s string) bool {
+	return s == "core" || s == "main" || s == "desktop"
 }
 
 // Load builds a Config from the ZPKG_* environment variables.
@@ -46,11 +88,14 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	reposEnv := os.Getenv("ZPKG_REPOS")
 	cfg := Config{
-		Repos: splitRepos(os.Getenv("ZPKG_REPOS")),
-		Root:  absRoot,
-		Cache: os.Getenv("ZPKG_CACHE"),
-		DB:    os.Getenv("ZPKG_DB"),
+		Repos:         splitRepos(reposEnv),
+		ReposExplicit: reposEnv != "",
+		Root:          absRoot,
+		Cache:         os.Getenv("ZPKG_CACHE"),
+		DB:            os.Getenv("ZPKG_DB"),
+		RecipeRoot:    filepath.Join(absRoot, "usr", "share", "zignos", "recipes"),
 	}
 	if cfg.Cache == "" {
 		cfg.Cache = filepath.Join(absRoot, "var", "cache", "zpkg")
@@ -58,15 +103,16 @@ func Load() (Config, error) {
 	if cfg.DB == "" {
 		cfg.DB = filepath.Join(absRoot, "var", "lib", "zpkg")
 	}
-	if len(cfg.Repos) == 0 {
-		// Default to the recipe tree shipped with the system. Categories
-		// are searched in this order (core first, then the extras).
-		for _, cat := range []string{"core", "main", "desktop"} {
-			d := filepath.Join(absRoot, "usr", "share", "zignos", "recipes", cat)
-			if fi, err := os.Stat(d); err == nil && fi.IsDir() {
-				cfg.Repos = append(cfg.Repos, d)
-			}
+	if err := loadChannel(&cfg); err != nil {
+		return Config{}, err
+	}
+	if cfg.ReposExplicit {
+		if len(cfg.Repos) > 0 {
+			cfg.TreeRoot = deriveTreeRoot(cfg.Repos[0])
 		}
+	} else {
+		cfg.Repos = discoverChannelRepos(cfg.RecipeRoot, cfg.Channel, &cfg.ChannelMissing)
+		cfg.TreeRoot = cfg.RecipeRoot
 	}
 	cfg.Options, err = options.Load(absRoot)
 	if err != nil {
@@ -141,6 +187,90 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// loadChannel resolves the release channel without validating it, so
+// "zpkg channel" can report and repair a bad value. Repo discovery treats an
+// unknown channel as missing.
+func loadChannel(cfg *Config) error {
+	if v := strings.TrimSpace(os.Getenv("ZPKG_CHANNEL")); v != "" {
+		cfg.Channel = strings.ToLower(v)
+		cfg.ChannelSource = "env"
+		return nil
+	}
+	v, err := options.ReadVar(cfg.Root, "etc/zpkg/make.conf", "CHANNEL")
+	if err != nil {
+		return err
+	}
+	if v = strings.TrimSpace(v); v != "" {
+		cfg.Channel = strings.ToLower(v)
+		cfg.ChannelSource = "make.conf"
+		return nil
+	}
+	cfg.Channel = "stable"
+	cfg.ChannelSource = "default"
+	return nil
+}
+
+// ApplyChannel overrides the release channel for one invocation. Repos are
+// recomputed from RecipeRoot unless ZPKG_REPOS was set explicitly.
+func ApplyChannel(cfg *Config, ch string) error {
+	ch = strings.ToLower(strings.TrimSpace(ch))
+	if !ValidChannel(ch) {
+		return fmt.Errorf("invalid release channel %q (use stable, testing or unstable)", ch)
+	}
+	cfg.Channel = ch
+	cfg.ChannelSource = "flag"
+	if cfg.ReposExplicit {
+		return nil
+	}
+	cfg.ChannelMissing = false
+	cfg.Repos = discoverChannelRepos(cfg.RecipeRoot, ch, &cfg.ChannelMissing)
+	cfg.TreeRoot = cfg.RecipeRoot
+	return nil
+}
+
+// discoverChannelRepos expands a channel tree into category directories.
+// A legacy flat tree (core/ directly under RecipeRoot) is accepted as
+// stable so systems installed before channels keep working.
+func discoverChannelRepos(root, ch string, missing *bool) []string {
+	if !ValidChannel(ch) {
+		*missing = true
+		return nil
+	}
+	chRoot := filepath.Join(root, ch)
+	if isDir(filepath.Join(chRoot, "core")) {
+		var repos []string
+		for _, cat := range []string{"core", "main", "desktop"} {
+			if d := filepath.Join(chRoot, cat); isDir(d) {
+				repos = append(repos, d)
+			}
+		}
+		return repos
+	}
+	if ch == "stable" && isDir(filepath.Join(root, "core")) {
+		var legacy []string
+		for _, cat := range []string{"core", "main", "desktop"} {
+			if d := filepath.Join(root, cat); isDir(d) {
+				legacy = append(legacy, d)
+			}
+		}
+		return legacy
+	}
+	*missing = true
+	return nil
+}
+
+// deriveTreeRoot finds the directory that owns recipes.manifest for an
+// explicitly configured repo. Channel trees are <tree>/<channel>/<category>;
+// legacy trees are <tree>/<category>.
+func deriveTreeRoot(repo string) string {
+	repo = filepath.Clean(repo)
+	parent := filepath.Dir(repo)
+	if isCategory(filepath.Base(repo)) && ValidChannel(filepath.Base(parent)) {
+		return filepath.Dir(parent)
+	}
+	return parent
 }
 
 // readSourceDateEpoch resolves the fixed build timestamp. ZPKG_SOURCE_DATE_EPOCH

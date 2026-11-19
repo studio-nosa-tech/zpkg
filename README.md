@@ -1,7 +1,8 @@
 # zpkg
 
 ZIGNOS のソースベースパッケージマネージャ(Go 単一バイナリ)。KISS Linux の `kiss` を
-出発点に、USE フラグ・スロット・binpkg・トランザクションまで実装した **v0.9**。
+出発点に、USE フラグ・スロット・binpkg・トランザクション・リリースチャンネル・
+再現可能ビルドまで実装した **v0.2.0**。
 設計の詳細は zignos リポジトリの `docs/design-pkg.md` を参照。
 
 ## ビルドとテスト
@@ -55,7 +56,7 @@ Total: 2 packages (1 target, 1 dependency)
 | `depends [-r] <pkg>...` | 依存(と makedepends)を含むビルド順。`-r` はインストール済みの逆依存を表示 |
 | `build [-f] [--no-sandbox] [--clean] [--repro-check] <pkg>...` | fetch → 検証 → destroot まで(インストールしない)。build は既定で bubblewrap 内。`--clean` は work を削除、`--repro-check` は 2 回ビルドして manifest 比較 |
 | `install [-f] [-p] [--asdeps] [--no-sandbox] [--clean] [--repro-check] <pkg>...` | 必要ならビルドして `$ZPKG_ROOT` へ。`-p` は pretend、`--asdeps` は world に追加しない。`--clean` / `--repro-check` はキャッシュを使わずソースビルド |
-| `upgrade [-p] [--newuse] [pkg]...` | world(または指定 pkg)をレシピの版へ。`--newuse` は USE 変更時に再ビルド |
+| `upgrade [-p] [-y] [--newuse] [--prune] [--allow-downgrade] [--channel <ch>] [--verify] [pkg]...` | world(または指定 pkg)を選択チャンネルの版へ。変更一覧・依存差分・警告を表示し、全ビルド成功後にインストール。`--newuse` は USE 変更時に再ビルド、`--prune` は孤立依存を削除、`--allow-downgrade` はダウングレードを許可、`--verify` は全ファイルの sha256 を検証 |
 | `remove [-f] <pkg>...` | 全スロットを削除し world から除去。逆依存がある場合は停止(`-f` で強制) |
 | `list` | インストール済み一覧(`name@slot` 表示) |
 | `info <pkg>...` | インストール済みメタデータとレシピの版 |
@@ -74,6 +75,7 @@ Total: 2 packages (1 target, 1 dependency)
 | `provenance <pkg>...` | 記録済みのビルド来歴(JSON)を表示 |
 | `sbom <pkg>...` / `sbom --system [-o <file>]` | SPDX 2.3 SBOM の表示・出力 |
 | `log [-p] <pkg>...` | ビルドログの表示(`-p` はパスだけ) |
+| `channel [stable\|testing\|unstable]` | 実効チャンネルと利用可能なツリーを表示。引数付きで `/etc/zpkg/make.conf` の `CHANNEL=` を更新 |
 | `recover` | 中断したトランザクションの修復(install はロールバック、remove は完了) |
 
 `-f` は「インストール済みでも処理する」フラグで、**binpkg キャッシュは無視しない**。
@@ -109,6 +111,68 @@ zpkg sync --from ./zignos-recipes -n
 置換する。署名がない場合は既定で拒否し、開発時のみ `--allow-unsigned`
 (または `ZPKG_ALLOW_UNSIGNED=1`)で許可する。署名が存在して壊れている
 場合は `--allow-unsigned` でも拒否する。
+
+チャンネルツリー(`stable/` / `testing/` / `unstable/` の下に `core/` と
+`main/`)も同じコマンドで同期できる。stage3 は stable だけを同梱するため、
+testing / unstable を使う場合は全チャンネル入りのレシピ tarball を
+`zpkg sync` で取り込む。従来のフラットツリー(`core/` / `main/` 直下)も
+stable として引き続き受理する。
+
+## リリースチャンネル
+
+ZIGNOS のレシピツリーは3つのチャンネルを持つ。
+
+| チャンネル | 用途 |
+|---|---|
+| `stable` | 安定版。既定。stage3 / イメージに同梱 |
+| `testing` | 次期 stable の検証 |
+| `unstable` | 開発中の最新版 |
+
+選択は `/etc/zpkg/make.conf` の `CHANNEL=` で行う(既定 `stable`)。
+
+```ini
+# /etc/zpkg/make.conf
+CHANNEL=testing
+CFLAGS="-O2 -pipe"
+```
+
+`ZPKG_CHANNEL` 環境変数は1回の実行だけ上書きする。`zpkg upgrade --channel`
+も同じで、設定ファイルは変更しない。永続的に切り替える場合は
+`zpkg channel testing` を使う(他の設定行は保持される)。
+
+```sh
+zpkg channel                  # 実効値と利用可能チャンネル
+zpkg channel testing          # make.conf を更新
+zpkg upgrade -p               # 差分の確認
+zpkg upgrade                  # 実行(確認プロンプトあり)
+```
+
+チャンネルごとにレシピの version / revision は独立して上げる。**同じ
+version+revision のまま内容だけ変えると binpkg キャッシュが衝突する**ため、
+内容を変えたら必ず revision を上げる。チャンネル間で版が同じパッケージは
+`zpkg upgrade` では再インストールされない(`zpkg install -f` で強制)。
+
+### upgrade の表示と安全性
+
+`zpkg upgrade` は実行前に次を表示する。
+
+- アップグレード / 新規依存 / 再ビルド / ダウングレードの一覧
+- 依存関係の追加・削除・制約変更
+- レシピの `upgrade_warning`、主要パッケージのメジャー版本変更、
+  新しい conflict、slot 変更、チャンネル変更
+- 不要になった依存(孤立パッケージ)。既定では残し、`--prune` で削除
+- 合計件数
+
+その後、確認プロンプトを出す。ダウングレードを含む場合は
+`--allow-downgrade` が無ければ専用の確認(`[y/N]`)を出す。`--yes` は
+通常の確認を省略する。非対話環境では `--yes` が必要。
+
+計画したパッケージは**すべてビルドしてから**インストールする。ビルドが
+1つでも失敗すればシステムは変更されない。インストール失敗時はその
+パッケージだけがロールバックされ、再実行で続きから再開できる。クラッシュ
+した場合は `zpkg recover` が処理する。完了後は依存関係を再解決し、
+変更したパッケージの manifest を検証する(`--verify` で全ファイルの
+sha256 も照合)。
 
 ## 署名と検証
 
@@ -335,6 +399,7 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
 | `ZPKG_ALLOW_UNSIGNED` | なし | `1` で署名のない index/レシピツリーを許可(開発用。壊れた署名は不可) |
 | `ZPKG_ALLOW_EXPIRED` | なし | `1` で署名の期限切れだけ許可(復旧用) |
 | `ZPKG_SANDBOX` | `auto` | `auto` / `require` / `off`。build の bubblewrap 隔離 |
+| `ZPKG_CHANNEL` | `stable` | `stable` / `testing` / `unstable`。`make.conf` の `CHANNEL=` を1回だけ上書き |
 | `ZPKG_BUILD_NET` | `1` | `0` でビルドを network namespace 内に隔離 |
 | `ZPKG_BWRAP` | `bwrap` | bubblewrap の実行ファイル |
 | `ZPKG_USE` / `ZPKG_CFLAGS` / `ZPKG_MAKEOPTS` | ファイル | USE とビルドフラグの上書き(空文字も「明示的に空」) |
@@ -346,7 +411,7 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
 
 - `/etc/zpkg/use.conf` — グローバル USE フラグ
 - `/etc/zpkg/package.use` — パッケージ単位の USE 上書き
-- `/etc/zpkg/make.conf` — `CFLAGS=` / `MAKEOPTS=`
+- `/etc/zpkg/make.conf` — `CFLAGS=` / `MAKEOPTS=` / `CHANNEL=stable|testing|unstable`
 - `/etc/zpkg/binrepo.conf` — `BINREPO=`
 - `/etc/zpkg/sync.conf` — `RECIPEURL=`(`zpkg sync` の既定ソース)
 - `/etc/zpkg/security.conf` — `TRUSTED_KEYS=` / `ALLOW_UNSIGNED=` / `ALLOW_EXPIRED=`
@@ -367,6 +432,7 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
 ├── iuse          # 理解する USE フラグ
 ├── provides / conflicts
 ├── build_network # 1/0 でビルド時ネットワークを上書き(省略時はグローバル)
+├── upgrade_warning # 任意。upgrade 前に表示する注意メッセージ
 ├── build         # bash スクリプト。必須。恒久的に shell
 ├── post_install  # 任意のフック
 └── post_remove   # 任意のフック
@@ -440,6 +506,11 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
 - slots: `name@slot` レコード。別スロットとのファイル重複はエラー
 - world / upgrade: 明示インストール集合の追跡、`--newuse`、upgrade 時の
   不要ファイル削除(内容一致時のみ、ロールバック可能)
+- リリースチャンネル: `stable` / `testing` / `unstable` の選択
+  (`make.conf` / `ZPKG_CHANNEL` / `--channel`)。`zpkg channel` で切替。
+  upgrade 前に変更一覧・依存差分・警告・孤立パッケージを表示し、
+  全ビルド成功後にインストール。`--prune`、`--allow-downgrade`、
+  更新後の整合性チェック(`--verify` で全ファイル照合)に対応
 - トランザクション: `.txn/journal.json`(ヘッダ)+ `.txn/journal.log`
   (追記専用イベント、fsync 付き)。失敗時はその場でロールバック、
   クラッシュ時は次回操作または `zpkg recover` で修復
@@ -464,5 +535,12 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
   SOURCE_DATE_EPOCH だけでは一致しないことがある
 - SBOM のライセンス / copyright はレシピに情報がないため `NOASSERTION`
 - ビルドログは cache 配下なので、cache を消すと失われる
+- upgrade はセット全体を1トランザクションでは扱わない。ビルド全成功後に
+  インストールし、失敗時はパッケージ単位でロールバックする。再実行で再開、
+  クラッシュは `zpkg recover` で復旧する
+- チャンネル間で version+revision が同じパッケージは upgrade で再インストール
+  されない(内容を変えたら revision を上げる。強制は `install -f`)
+- 孤立パッケージの検出は slot 0 のみ。複数スロットを持つパッケージは
+  `--prune` の対象外
 - 素の `chroot` では bwrap の `pivot_root` が使えないため、`auto` は警告して
   直接ビルドにフォールバックする。stage3 では `zignos-enter.sh` を使う

@@ -35,6 +35,10 @@ type Recipe struct {
 	// recipe. nil means "inherit"; false means "deny even if the global
 	// policy allows it".
 	BuildNetwork *bool
+
+	// UpgradeWarning is an optional message shown by "zpkg upgrade" before
+	// this package is replaced.
+	UpgradeWarning string
 }
 
 // FullVersion is the canonical "pkgver-rN" form.
@@ -129,6 +133,12 @@ func load(dir, name string) (*Recipe, error) {
 		default:
 			return nil, fmt.Errorf("%s: build_network %q is not 0 or 1", name, vals[0])
 		}
+	}
+
+	if vals, err := readLines(filepath.Join(dir, "upgrade_warning"), true); err != nil {
+		return nil, err
+	} else if len(vals) > 0 {
+		r.UpgradeWarning = strings.Join(vals, " ")
 	}
 
 	r.Build = filepath.Join(dir, "build")

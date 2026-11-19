@@ -270,6 +270,37 @@ func writeAtomic(path string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 
+// SetVar updates KEY=value in a make.conf style file, preserving comments
+// and unrelated lines. A missing file is created.
+func SetVar(path, key, value string) error {
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	text := strings.TrimRight(string(data), "\n")
+	var lines []string
+	if text != "" {
+		lines = strings.Split(text, "\n")
+	}
+	found := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		k, _, ok := strings.Cut(trimmed, "=")
+		if ok && strings.TrimSpace(k) == key {
+			lines[i] = key + "=" + value
+			found = true
+			break
+		}
+	}
+	if !found {
+		lines = append(lines, key+"="+value)
+	}
+	return writeAtomic(path, []byte(strings.Join(lines, "\n")+"\n"))
+}
+
 // ReadVar returns KEY=value from a make.conf style file under root (the
 // path is relative to root). Empty when the file or key is absent.
 func ReadVar(root, relPath, key string) (string, error) {

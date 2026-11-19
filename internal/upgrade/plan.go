@@ -1,0 +1,448 @@
+// Package upgrade plans and verifies rolling-release upgrades.
+//
+// A Plan is computed before anything is built or installed. It compares the
+// selected release channel's recipe closure with the installed packages and
+// reports upgrades, rebuilds, downgrades, new dependencies, dependency
+// changes, orphaned packages and breaking-change warnings.
+package upgrade
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/studio-nosa-tech/zpkg/internal/config"
+	"github.com/studio-nosa-tech/zpkg/internal/depspec"
+	"github.com/studio-nosa-tech/zpkg/internal/pkgdb"
+	"github.com/studio-nosa-tech/zpkg/internal/recipe"
+	"github.com/studio-nosa-tech/zpkg/internal/resolve"
+	"github.com/studio-nosa-tech/zpkg/internal/version"
+)
+
+// Kind is what an upgrade entry will do.
+type Kind string
+
+const (
+	KindInstall   Kind = "install"   // dependency not installed yet
+	KindUpgrade   Kind = "upgrade"   // newer recipe version
+	KindRebuild   Kind = "rebuild"   // same version, USE flags changed (--newuse)
+	KindDowngrade Kind = "downgrade" // recipe version is older (channel switch)
+)
+
+// DepChange is one dependency whose expression changed.
+type DepChange struct {
+	Name string
+	Old  string
+	New  string
+}
+
+// Entry is one package the upgrade will change.
+type Entry struct {
+	Name         string
+	Slot         string
+	Kind         Kind
+	OldVersion   string
+	NewVersion   string
+	Recipe       *recipe.Recipe
+	Installed    *pkgdb.Rec
+	DepsAdded    []string
+	DepsRemoved  []string
+	DepsChanged  []DepChange
+	BuildAdded   []string
+	BuildRemoved []string
+	BuildChanged []DepChange
+	Warnings     []string
+}
+
+// Orphan is an installed package no longer required by the selected channel.
+type Orphan struct {
+	Name       string
+	Slot       string
+	Version    string
+	RequiredBy []string
+}
+
+// Prunable reports whether --prune can remove the orphan safely.
+func (o Orphan) Prunable() bool { return len(o.RequiredBy) == 0 }
+
+// Options controls plan construction.
+type Options struct {
+	NewUse bool // also rebuild packages whose effective USE flags changed
+}
+
+// Plan is the complete pre-upgrade picture.
+type Plan struct {
+	Channel         string
+	ChannelSource   string
+	PreviousChannel string
+	ChannelChanged  bool
+	Targets         []string
+	Entries         []Entry
+	Orphans         []Orphan
+	Closure         []string
+	Warnings        []string
+}
+
+// Actions returns entries that require building/installing.
+func (p *Plan) Actions() []Entry { return p.Entries }
+
+// HasDowngrades reports whether any entry goes backwards.
+func (p *Plan) HasDowngrades() bool {
+	for _, e := range p.Entries {
+		if e.Kind == KindDowngrade {
+			return true
+		}
+	}
+	return false
+}
+
+// Counts returns the number of entries per kind.
+func (p *Plan) Counts() map[Kind]int {
+	m := map[Kind]int{}
+	for _, e := range p.Entries {
+		m[e.Kind]++
+	}
+	return m
+}
+
+// Build resolves targets against the selected channel and compares the
+// result with the installed database. It never changes anything.
+func Build(cfg config.Config, db pkgdb.DB, targets []string, opts Options) (*Plan, error) {
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no upgrade targets")
+	}
+	idx, err := resolve.NewIndex(cfg.Repos)
+	if err != nil {
+		return nil, err
+	}
+	recs, err := installedRecords(db)
+	if err != nil {
+		return nil, err
+	}
+	res, err := (&resolve.Resolver{Index: idx, Options: cfg.Options, Installed: recs}).Resolve(targets)
+	if err != nil {
+		return nil, err
+	}
+
+	byKey := make(map[string]*pkgdb.Rec, len(recs))
+	slots := make(map[string][]string)
+	for _, rec := range recs {
+		byKey[pkgdb.SlotKey(rec.Name, rec.Slot)] = rec
+		slots[rec.Name] = append(slots[rec.Name], rec.Slot)
+	}
+
+	plan := &Plan{
+		Channel:       cfg.Channel,
+		ChannelSource: cfg.ChannelSource,
+		Targets:       append([]string{}, targets...),
+	}
+	plan.PreviousChannel = ReadAppliedChannel(db)
+	if plan.PreviousChannel != "" && plan.PreviousChannel != cfg.Channel {
+		plan.ChannelChanged = true
+		plan.Warnings = append(plan.Warnings,
+			fmt.Sprintf("channel changed: %s -> %s", plan.PreviousChannel, cfg.Channel))
+	}
+
+	closure := make(map[string]bool, len(res.Order))
+	for _, name := range res.Order {
+		closure[name] = true
+		plan.Closure = append(plan.Closure, name)
+
+		c := res.Selected[name]
+		if c == nil || c.Recipe == nil {
+			continue
+		}
+		r := c.Recipe
+		rec := byKey[pkgdb.SlotKey(name, r.Slot)]
+		use := cfg.Options.ForPackage(name).Use
+		e := Entry{
+			Name: name, Slot: r.Slot, NewVersion: r.FullVersion(),
+			Recipe: r, Installed: rec,
+		}
+		if rec == nil {
+			e.Kind = KindInstall
+			if otherSlots := slots[name]; len(otherSlots) > 0 {
+				e.Warnings = append(e.Warnings,
+					fmt.Sprintf("installed in slot %s; recipe now uses slot %s (old slot remains)", strings.Join(otherSlots, ","), r.Slot))
+			}
+		} else {
+			e.OldVersion = rec.VersionString()
+			switch cmp := version.Compare(rec.VersionString(), r.FullVersion()); {
+			case cmp < 0:
+				e.Kind = KindUpgrade
+			case cmp > 0:
+				e.Kind = KindDowngrade
+			case opts.NewUse && useFlagsChanged(rec, cfg):
+				e.Kind = KindRebuild
+			default:
+				continue // up to date
+			}
+			e.Warnings = append(e.Warnings, upgradeWarnings(rec, r)...)
+			fillDependencyDiff(&e, use)
+		}
+		plan.Entries = append(plan.Entries, e)
+	}
+	plan.Orphans = findOrphans(recs, closure, updatedDeps(plan.Entries, cfg))
+	return plan, nil
+}
+
+// updatedDeps returns the dependency names each planned package will have
+// after the upgrade. Orphan detection must use these, not the old metadata:
+// the whole point of an upgrade is often to drop a dependency.
+func updatedDeps(entries []Entry, cfg config.Config) map[string]map[string]bool {
+	out := make(map[string]map[string]bool, len(entries))
+	for _, e := range entries {
+		use := cfg.Options.ForPackage(e.Name).Use
+		names := map[string]bool{}
+		for name := range activeDeps(e.Recipe.Depends, use) {
+			names[name] = true
+		}
+		for name := range activeDeps(e.Recipe.MakeDepends, use) {
+			names[name] = true
+		}
+		out[e.Name] = names
+	}
+	return out
+}
+
+func installedRecords(db pkgdb.DB) ([]*pkgdb.Rec, error) {
+	refs, err := db.List()
+	if err != nil {
+		return nil, err
+	}
+	recs := make([]*pkgdb.Rec, 0, len(refs))
+	for _, ref := range refs {
+		rec, err := db.Get(ref.Name, ref.Slot)
+		if err != nil {
+			return nil, err
+		}
+		recs = append(recs, rec)
+	}
+	return recs, nil
+}
+
+func useFlagsChanged(rec *pkgdb.Rec, cfg config.Config) bool {
+	if rec.Meta == nil {
+		return false
+	}
+	want := cfg.Options.ForPackage(rec.Name).Use
+	got := rec.Meta.UseFlags
+	if len(want) != len(got) {
+		return true
+	}
+	for i := range want {
+		if want[i] != got[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// activeDeps evaluates conditional atoms with a USE flag set and returns
+// name -> raw atom (first occurrence wins).
+func activeDeps(raws, use []string) map[string]string {
+	useSet := make(map[string]bool, len(use))
+	for _, f := range use {
+		useSet[f] = true
+	}
+	out := map[string]string{}
+	for _, raw := range raws {
+		a, err := depspec.Parse(raw)
+		if err != nil || a.Name == "" {
+			continue
+		}
+		if a.Condition != "" {
+			enabled := useSet[a.Condition]
+			if a.Negated {
+				enabled = !enabled
+			}
+			if !enabled {
+				continue
+			}
+		}
+		if _, ok := out[a.Name]; !ok {
+			out[a.Name] = a.Raw
+		}
+	}
+	return out
+}
+
+func fillDependencyDiff(e *Entry, use []string) {
+	newDeps := activeDeps(e.Recipe.Depends, use)
+	newBuild := activeDeps(e.Recipe.MakeDepends, use)
+	var oldDeps, oldBuild map[string]string
+	if e.Installed != nil && e.Installed.Meta != nil {
+		oldDeps = activeDeps(e.Installed.Meta.Depends, e.Installed.Meta.UseFlags)
+		oldBuild = activeDeps(e.Installed.Meta.BuildDeps, e.Installed.Meta.UseFlags)
+	} else {
+		oldDeps, oldBuild = map[string]string{}, map[string]string{}
+	}
+	e.DepsAdded, e.DepsRemoved, e.DepsChanged = compareDeps(oldDeps, newDeps)
+	e.BuildAdded, e.BuildRemoved, e.BuildChanged = compareDeps(oldBuild, newBuild)
+}
+
+func compareDeps(old, new map[string]string) (added, removed []string, changed []DepChange) {
+	for name, raw := range new {
+		if oldRaw, ok := old[name]; !ok {
+			added = append(added, raw)
+		} else if oldRaw != raw {
+			changed = append(changed, DepChange{Name: name, Old: oldRaw, New: raw})
+		}
+	}
+	for name, raw := range old {
+		if _, ok := new[name]; !ok {
+			removed = append(removed, raw)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Slice(changed, func(i, j int) bool { return changed[i].Name < changed[j].Name })
+	return added, removed, changed
+}
+
+// criticalPackages get a major-version warning even when the recipe does not
+// ship an explicit upgrade_warning.
+var criticalPackages = map[string]bool{
+	"glibc": true, "gcc": true, "binutils": true, "linux": true,
+	"linux-headers": true, "openrc": true, "initscripts": true,
+	"eudev": true, "busybox": true, "shadow": true, "util-linux": true,
+	"e2fsprogs": true, "kbd": true, "zpkg": true,
+}
+
+func upgradeWarnings(rec *pkgdb.Rec, r *recipe.Recipe) []string {
+	var out []string
+	if r.UpgradeWarning != "" {
+		out = append(out, r.UpgradeWarning)
+	}
+	oldV := rec.VersionString()
+	newV := r.FullVersion()
+	if criticalPackages[r.Name] && majorVersion(oldV) != majorVersion(newV) &&
+		majorVersion(oldV) != "" && majorVersion(newV) != "" {
+		out = append(out, fmt.Sprintf("major version %s -> %s", oldV, newV))
+	}
+	oldConflicts := map[string]bool{}
+	if rec.Meta != nil {
+		for _, c := range rec.Meta.Conflicts {
+			if a, err := depspec.Parse(c); err == nil {
+				oldConflicts[a.Name] = true
+			}
+		}
+	}
+	for _, c := range r.Conflicts {
+		a, err := depspec.Parse(c)
+		if err == nil && a.Name != "" && !oldConflicts[a.Name] {
+			out = append(out, "new conflict: "+a.Raw)
+		}
+	}
+	return out
+}
+
+func majorVersion(v string) string {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	i := 0
+	for i < len(v) && (v[i] < '0' || v[i] > '9') {
+		i++
+	}
+	j := i
+	for j < len(v) && v[j] >= '0' && v[j] <= '9' {
+		j++
+	}
+	return v[i:j]
+}
+
+func findOrphans(recs []*pkgdb.Rec, closure map[string]bool, newDeps map[string]map[string]bool) []Orphan {
+	byName := map[string][]string{}
+	for _, rec := range recs {
+		byName[rec.Name] = append(byName[rec.Name], rec.Slot)
+	}
+	var orphans []Orphan
+	for _, rec := range recs {
+		if rec.Slot != "0" || closure[rec.Name] || len(byName[rec.Name]) > 1 {
+			continue
+		}
+		// Virtual names this orphan satisfies. They are what dependents
+		// actually name, so they must be matched too.
+		provides := map[string]bool{}
+		if rec.Meta != nil {
+			for _, p := range rec.Meta.Provides {
+				if a, err := depspec.ParseProvided(p); err == nil && a.Name != "" {
+					provides[a.Name] = true
+				}
+			}
+		}
+		o := Orphan{Name: rec.Name, Slot: rec.Slot, Version: rec.VersionString()}
+		for _, other := range recs {
+			if other.Name == rec.Name || other.Meta == nil {
+				continue
+			}
+			if dependsOn(other, rec.Name, provides, newDeps) {
+				o.RequiredBy = append(o.RequiredBy, other.Name)
+			}
+		}
+		sort.Strings(o.RequiredBy)
+		orphans = append(orphans, o)
+	}
+	sort.Slice(orphans, func(i, j int) bool { return orphans[i].Name < orphans[j].Name })
+	return orphans
+}
+
+// dependsOn reports whether rec requires target, either directly or through
+// one of the virtual names target provides. Planned packages are evaluated
+// with their new recipe dependencies.
+func dependsOn(rec *pkgdb.Rec, target string, provides map[string]bool, newDeps map[string]map[string]bool) bool {
+	if names, ok := newDeps[rec.Name]; ok {
+		if names[target] {
+			return true
+		}
+		for name := range provides {
+			if names[name] {
+				return true
+			}
+		}
+		return false
+	}
+	for _, raw := range append(append([]string{}, rec.Meta.Depends...), rec.Meta.BuildDeps...) {
+		a, err := depspec.Parse(raw)
+		if err != nil || a.Name == "" {
+			continue
+		}
+		if a.Name == target || provides[a.Name] {
+			return true
+		}
+	}
+	return false
+}
+
+// ReadAppliedChannel returns the channel recorded after the last successful
+// upgrade ("" when none has been recorded).
+func ReadAppliedChannel(db pkgdb.DB) string {
+	data, err := os.ReadFile(filepath.Join(db.Dir, ".channel"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// WriteAppliedChannel records the channel a successful upgrade applied.
+func WriteAppliedChannel(db pkgdb.DB, channel string) error {
+	if err := os.MkdirAll(db.Dir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(db.Dir, ".channel.tmp-")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.WriteString(channel + "\n"); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(db.Dir, ".channel"))
+}

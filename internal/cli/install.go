@@ -22,7 +22,7 @@ import (
 
 // metaFromRecipe captures the provenance of an install so later upgrades
 // and queries do not need to re-read the recipe tree.
-func metaFromRecipe(r *recipe.Recipe, use []string) *pkgdb.Meta {
+func metaFromRecipe(r *recipe.Recipe, use []string, channel string) *pkgdb.Meta {
 	return &pkgdb.Meta{
 		Schema:    pkgdb.Schema,
 		Name:      r.Name,
@@ -30,6 +30,7 @@ func metaFromRecipe(r *recipe.Recipe, use []string) *pkgdb.Meta {
 		Revision:  r.Revision,
 		Slot:      r.Slot,
 		Repo:      r.Repo,
+		Channel:   channel,
 		Arch:      runtime.GOARCH,
 		Installed: time.Now().UTC().Format(time.RFC3339),
 		UseFlags:  append([]string{}, use...),
@@ -42,8 +43,11 @@ func metaFromRecipe(r *recipe.Recipe, use []string) *pkgdb.Meta {
 
 // recipeTreeOrigin finds the recipe tree root (parent of the category dir)
 // and returns its signed manifest provenance, when present.
-func recipeTreeOrigin(r *recipe.Recipe) (root, keyID string, generation int64) {
-	root = filepath.Dir(filepath.Dir(r.Dir))
+func recipeTreeOrigin(r *recipe.Recipe, cfg config.Config) (root, keyID string, generation int64) {
+	root = cfg.TreeRoot
+	if root == "" {
+		root = filepath.Dir(filepath.Dir(r.Dir))
+	}
 	m, err := recipesig.ReadManifest(root)
 	if err != nil {
 		return root, "", 0
@@ -64,6 +68,11 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
+	}
+	if o.channel != "" {
+		if err := config.ApplyChannel(&cfg, o.channel); err != nil {
+			return err
+		}
 	}
 	if o.noSandbox {
 		cfg.SandboxMode = "off"
@@ -120,7 +129,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		jobs = append(jobs, installJob{r: r, target: targetSet[name]})
 	}
 
-	if len(jobs) > 0 {
+	if len(jobs) > 0 && !o.skipPlan {
 		entries := make([]planEntry, len(jobs))
 		for i, jb := range jobs {
 			entries[i] = planEntry{
@@ -144,6 +153,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		return nil
 	}
 
+	var staged []preparedInstall
 	for i, jb := range jobs {
 		r := jb.r
 		label := pkgLabel(r)
@@ -220,7 +230,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 				reproChecked = true
 			}
 		}
-		meta := metaFromRecipe(r, opts.Use)
+		meta := metaFromRecipe(r, opts.Use, cfg.Channel)
 		meta.Origin = res.OriginKind
 		meta.OriginRepo = res.OriginRepo
 		meta.OriginKeyID = res.OriginKeyID
@@ -240,7 +250,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		if meta.Origin == "source" {
 			// The recipe tree itself may have been synced from a signed
 			// manifest; record that signer as the source provenance.
-			if root, keyID, generation := recipeTreeOrigin(r); keyID != "" {
+			if root, keyID, generation := recipeTreeOrigin(r, cfg); keyID != "" {
 				meta.OriginRepo = root
 				meta.OriginKeyID = keyID
 				meta.OriginGeneration = generation
@@ -259,39 +269,74 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 			phase("Destroot %s", res.Destroot)
 			continue
 		}
-		if fromBinpkg {
-			phase("Installing (%d of %d) %s (binpkg)", i+1, len(jobs), label)
-		} else {
-			phase("Installing (%d of %d) %s", i+1, len(jobs), label)
+		p := preparedInstall{
+			r: r, res: res, meta: meta, info: info, label: label,
+			fromBinpkg: fromBinpkg, index: i, total: len(jobs),
 		}
-		rec := &pkgdb.Rec{
-			Name:     r.Name,
-			Slot:     r.Slot,
-			Version:  r.Version,
-			Revision: r.Revision,
-			Entries:  res.Entries,
-			Meta:     meta,
+		if o.deferInstall {
+			// Upgrade mode: build everything first so a build failure
+			// leaves the installed system untouched.
+			staged = append(staged, p)
+			continue
 		}
-		if err := install.Apply(rec, res.Destroot, cfg.Root, db); err != nil {
+		if err := applyPrepared(p, cfg, db, targetSet, o); err != nil {
 			return err
 		}
-		if err := writeInstalledProvenance(cfg, db, r, info); err != nil {
-			fmt.Fprintln(os.Stderr, "zpkg: provenance write failed:", err)
-		}
-		// Only packages named on the command line (or the providers chosen
-		// for virtual targets) become world members; dependencies are
-		// tracked but not part of the world set.
-		if targetSet[r.Name] && !o.asdeps {
-			if err := world.Add(cfg.DB, r.Name); err != nil {
-				return err
-			}
-		}
-		if err := runHook(cfg, r, "post_install"); err != nil {
-			return err
-		}
-		refreshLdconfig(cfg)
-		phase("Installed %s", label)
 	}
+	for _, p := range staged {
+		if err := applyPrepared(p, cfg, db, targetSet, o); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// preparedInstall is one built package waiting to be applied. It exists so
+// "zpkg upgrade" can finish every build before touching the live system.
+type preparedInstall struct {
+	r          *recipe.Recipe
+	res        *build.Result
+	meta       *pkgdb.Meta
+	info       *provenance.Info
+	label      string
+	fromBinpkg bool
+	index      int
+	total      int
+}
+
+func applyPrepared(p preparedInstall, cfg config.Config, db pkgdb.DB, targetSet map[string]bool, o installOptions) error {
+	if p.fromBinpkg {
+		phase("Installing (%d of %d) %s (binpkg)", p.index+1, p.total, p.label)
+	} else {
+		phase("Installing (%d of %d) %s", p.index+1, p.total, p.label)
+	}
+	rec := &pkgdb.Rec{
+		Name:     p.r.Name,
+		Slot:     p.r.Slot,
+		Version:  p.r.Version,
+		Revision: p.r.Revision,
+		Entries:  p.res.Entries,
+		Meta:     p.meta,
+	}
+	if err := install.Apply(rec, p.res.Destroot, cfg.Root, db); err != nil {
+		return err
+	}
+	if err := writeInstalledProvenance(cfg, db, p.r, p.info); err != nil {
+		fmt.Fprintln(os.Stderr, "zpkg: provenance write failed:", err)
+	}
+	// Only packages named on the command line (or the providers chosen
+	// for virtual targets) become world members; dependencies are
+	// tracked but not part of the world set.
+	if targetSet[p.r.Name] && !o.asdeps {
+		if err := world.Add(cfg.DB, p.r.Name); err != nil {
+			return err
+		}
+	}
+	if err := runHook(cfg, p.r, "post_install"); err != nil {
+		return err
+	}
+	refreshLdconfig(cfg)
+	phase("Installed %s", p.label)
 	return nil
 }
 

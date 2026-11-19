@@ -23,9 +23,11 @@ const syncUsage = `Usage:
 
 Replace the recipe tree as a whole. The source may be:
   - a stage3 tarball (only usr/share/zignos/recipes is extracted)
-  - a recipe-only tarball/directory (core/ and main/ at the top)
+  - a recipe-only tarball/directory
   - a directory containing usr/share/zignos/recipes
 
+The tree may have release channels (stable/, testing/, unstable/, each with
+core/ and main/) or the legacy flat layout (core/ and main/ at the top).
 --from is required unless ZPKG_RECIPE_URL or RECIPEURL in
 /etc/zpkg/sync.conf is set. The new tree is validated (core and main) and
 its recipes.manifest signature is verified against the trusted keys before
@@ -40,13 +42,49 @@ type syncOptions struct {
 	allowUnsigned bool
 }
 
-type syncStats struct {
+type categoryCounts struct {
 	core    int
 	main    int
 	desktop int
 }
 
-func (s syncStats) total() int { return s.core + s.main + s.desktop }
+func (c categoryCounts) total() int { return c.core + c.main + c.desktop }
+
+// syncStats is per channel. Legacy is true for a flat core/main tree
+// installed before release channels existed.
+type syncStats struct {
+	channels map[string]categoryCounts
+	legacy   bool
+}
+
+func (s syncStats) total() int {
+	n := 0
+	for _, c := range s.channels {
+		n += c.total()
+	}
+	return n
+}
+
+// summary renders the validation result for "zpkg sync".
+func (s syncStats) summary() string {
+	if s.legacy {
+		c := s.channels["legacy"]
+		return fmt.Sprintf("%d recipes (legacy flat: core %d, main %d)", c.total(), c.core, c.main)
+	}
+	var parts []string
+	for _, ch := range config.Channels {
+		c, ok := s.channels[ch]
+		if !ok {
+			continue
+		}
+		part := fmt.Sprintf("%s %d/%d", ch, c.core, c.main)
+		if c.desktop > 0 {
+			part += fmt.Sprintf("/%d", c.desktop)
+		}
+		parts = append(parts, part)
+	}
+	return fmt.Sprintf("%d recipes (%s)", s.total(), strings.Join(parts, ", "))
+}
 
 func parseSyncArgs(args []string) (syncOptions, error) {
 	var o syncOptions
@@ -123,12 +161,7 @@ func cmdSync(args []string) error {
 	if err != nil {
 		return err
 	}
-	extra := ""
-	if stats.desktop > 0 {
-		extra = fmt.Sprintf(", desktop %d", stats.desktop)
-	}
-	phase("Recipe tree: %d recipes (core %d, main %d%s)",
-		stats.total(), stats.core, stats.main, extra)
+	phase("Recipe tree: %s", stats.summary())
 	if o.dryRun {
 		fmt.Printf("Would update %s\n", dest)
 		return nil
@@ -261,7 +294,8 @@ func isHTTP(s string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
-func isRecipeTree(dir string) bool {
+// hasCategories reports a flat legacy tree: core/ and main/ directly below.
+func hasCategories(dir string) bool {
 	for _, cat := range []string{"core", "main"} {
 		fi, err := os.Stat(filepath.Join(dir, cat))
 		if err != nil || !fi.IsDir() {
@@ -271,9 +305,23 @@ func isRecipeTree(dir string) bool {
 	return true
 }
 
+// isRecipeTree accepts either a channel tree (any of stable/testing/unstable
+// with core/ and main/) or the legacy flat layout.
+func isRecipeTree(dir string) bool {
+	if hasCategories(dir) {
+		return true
+	}
+	for _, ch := range config.Channels {
+		if hasCategories(filepath.Join(dir, ch)) {
+			return true
+		}
+	}
+	return false
+}
+
 // findRecipeTree recognizes the two layouts users normally have: a recipe
-// checkout (core/main at the root) and an unpacked stage3 (the tree under
-// usr/share/zignos/recipes).
+// checkout (channel dirs or legacy core/main at the root) and an unpacked
+// stage3 (the tree under usr/share/zignos/recipes).
 func findRecipeTree(path string) (string, error) {
 	for _, candidate := range []string{
 		path,
@@ -283,7 +331,7 @@ func findRecipeTree(path string) (string, error) {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("%s: no recipe tree (core/ and main/) found", path)
+	return "", fmt.Errorf("%s: no recipe tree (core/ + main/, or stable|testing|unstable with core/ + main/) found", path)
 }
 
 // findRecipeTreeDeep handles archive roots with an arbitrary top-level
@@ -314,15 +362,14 @@ func findRecipeTreeDeep(root string) (string, error) {
 		return "", err
 	}
 	if found == "" {
-		return "", fmt.Errorf("%s: no recipe tree (core/ and main/) found", root)
+		return "", fmt.Errorf("%s: no recipe tree (core/ + main/, or stable|testing|unstable with core/ + main/) found", root)
 	}
 	return found, nil
 }
 
-// scanRecipeTree counts recipes (directories with a version file) and
-// requires the two mandatory categories.
-func scanRecipeTree(root string) (syncStats, error) {
-	var s syncStats
+// countCategories counts recipe directories (those with a version file).
+func countCategories(root string) (categoryCounts, error) {
+	var c categoryCounts
 	for _, cat := range []string{"core", "main", "desktop"} {
 		dir := filepath.Join(root, cat)
 		entries, err := os.ReadDir(dir)
@@ -330,7 +377,7 @@ func scanRecipeTree(root string) (syncStats, error) {
 			continue
 		}
 		if err != nil {
-			return s, fmt.Errorf("%s: %w", dir, err)
+			return c, fmt.Errorf("%s: %w", dir, err)
 		}
 		n := 0
 		for _, e := range entries {
@@ -343,17 +390,58 @@ func scanRecipeTree(root string) (syncStats, error) {
 		}
 		switch cat {
 		case "core":
-			s.core = n
+			c.core = n
 		case "main":
-			s.main = n
+			c.main = n
 		case "desktop":
-			s.desktop = n
+			c.desktop = n
 		}
 	}
-	if s.core == 0 || s.main == 0 {
-		return s, fmt.Errorf("%s: incomplete recipe tree (core %d, main %d)", root, s.core, s.main)
+	return c, nil
+}
+
+// scanRecipeTree validates a channel tree or a legacy flat tree and counts
+// recipes per category.
+func scanRecipeTree(root string) (syncStats, error) {
+	flat := hasCategories(root)
+	var chans []string
+	for _, ch := range config.Channels {
+		if fi, err := os.Stat(filepath.Join(root, ch)); err == nil && fi.IsDir() {
+			chans = append(chans, ch)
+		}
 	}
-	return s, nil
+	if flat && len(chans) > 0 {
+		return syncStats{}, fmt.Errorf("%s: mixed recipe tree layout (both core/ and %s/ at the top)", root, chans[0])
+	}
+	if len(chans) == 0 {
+		if !flat {
+			return syncStats{}, fmt.Errorf("%s: no recipe tree (core/ + main/, or stable|testing|unstable with core/ + main/)", root)
+		}
+		c, err := countCategories(root)
+		if err != nil {
+			return syncStats{}, err
+		}
+		if c.core == 0 || c.main == 0 {
+			return syncStats{}, fmt.Errorf("%s: incomplete recipe tree (core %d, main %d)", root, c.core, c.main)
+		}
+		return syncStats{channels: map[string]categoryCounts{"legacy": c}, legacy: true}, nil
+	}
+	stats := syncStats{channels: map[string]categoryCounts{}}
+	for _, ch := range chans {
+		chRoot := filepath.Join(root, ch)
+		if !hasCategories(chRoot) {
+			return syncStats{}, fmt.Errorf("%s: channel %s needs core/ and main/", root, ch)
+		}
+		c, err := countCategories(chRoot)
+		if err != nil {
+			return syncStats{}, err
+		}
+		if c.core == 0 || c.main == 0 {
+			return syncStats{}, fmt.Errorf("%s: channel %s is incomplete (core %d, main %d)", root, ch, c.core, c.main)
+		}
+		stats.channels[ch] = c
+	}
+	return stats, nil
 }
 
 func copyTree(src, dst string) error {
@@ -468,7 +556,7 @@ func recipePrefixInArchive(archive string) (string, error) {
 		if waitErr != nil {
 			return "", fmt.Errorf("read archive %s: %w", archive, waitErr)
 		}
-		return "", fmt.Errorf("%s: no recipe tree (core/*/version) in archive", archive)
+		return "", fmt.Errorf("%s: no recipe tree (core/*/version or <channel>/core/*/version) in archive", archive)
 	}
 	return prefix, nil
 }
@@ -479,7 +567,13 @@ func recipePrefix(name string) (string, bool) {
 	parts := strings.Split(work, "/")
 	for i := 0; i+2 < len(parts); i++ {
 		if (parts[i] == "core" || parts[i] == "main") && parts[i+2] == "version" {
-			prefix := strings.Join(parts[:i], "/")
+			root := i
+			if i > 0 && config.ValidChannel(parts[i-1]) {
+				// <tree>/<channel>/core/<pkg>/version: extract from the
+				// tree (or channel) root, not just the category.
+				root = i - 1
+			}
+			prefix := strings.Join(parts[:root], "/")
 			// Keep the archive's "./" spelling so tar matches the
 			// member directly; the fallback in extractRecipeArchive
 			// covers archives written without it.

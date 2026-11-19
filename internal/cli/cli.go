@@ -9,7 +9,10 @@ import (
 	"github.com/studio-nosa-tech/zpkg/internal/config"
 )
 
-const usage = `zpkg - ZIGNOS package manager (v0.9)
+// Version is the zpkg release version shipped by this source tree.
+const Version = "0.2.0"
+
+const usage = `zpkg - ZIGNOS package manager (v` + Version + `)
 
 Usage:
   zpkg depends [-r] <pkg>...  print build order including dependencies;
@@ -26,10 +29,18 @@ Usage:
                               --no-sandbox  build without bubblewrap isolation
                               --clean  remove the build work dir first
                               --repro-check  build twice and compare manifests
-  zpkg upgrade [-p] [--newuse] [pkg]...
+  zpkg upgrade [-p] [-y] [--newuse] [--prune] [--allow-downgrade] [--channel <ch>] [--verify] [pkg]...
                               upgrade world (or the named packages) to the
-                              recipe versions; --newuse also rebuilds a
-                              package whose effective USE flags changed
+                              selected release channel. Shows the changes,
+                              dependency changes and warnings, builds every
+                              package, then installs. --newuse also rebuilds
+                              packages whose effective USE flags changed.
+                              -p  pretend: show the upgrade plan only
+                              -y  do not ask for confirmation
+                              --prune  remove no-longer-required dependencies
+                              --allow-downgrade  permit channel downgrades
+                              --channel  override the channel for this run
+                              --verify  hash every file in the final check
   zpkg remove [-f] <pkg>...   remove installed packages (all slots) and
                               their world entries; -f skips the reverse-
                               dependency safety check
@@ -71,13 +82,19 @@ Usage:
   zpkg sbom --system [-o <file>]
                               SPDX 2.3 SBOM of every installed package
   zpkg log [-p] <pkg>...      print a package's build log; -p prints its path
+  zpkg channel [stable|testing|unstable]
+                              show the release channel and available trees,
+                              or write CHANNEL= to /etc/zpkg/make.conf
   zpkg recover                roll back / complete an interrupted transaction
 
 Environment:
   ZPKG_REPOS   recipe repo directories, separated by the OS path list
                separator (';' on Windows, ':' on Unix); first match wins.
-               Defaults to the tree shipped in $ZPKG_ROOT/usr/share/zignos/
-               recipes (core, main, desktop) when unset
+               When unset, $ZPKG_ROOT/usr/share/zignos/recipes/<channel>/
+               {core,main,desktop} is used (legacy flat trees are accepted
+               as stable)
+  ZPKG_CHANNEL release channel: stable (default), testing or unstable.
+               Overrides CHANNEL= in /etc/zpkg/make.conf for this run
   ZPKG_ROOT    target system root (default /)
   ZPKG_CACHE   cache dir (default $ZPKG_ROOT/var/cache/zpkg)
   ZPKG_DB      package db dir (default $ZPKG_ROOT/var/lib/zpkg)
@@ -135,6 +152,13 @@ type installOptions struct {
 	noSandbox  bool
 	clean      bool // remove the build work directory before building
 	reproCheck bool // build twice and compare the destroot manifests
+
+	// Upgrade support: build every package before installing any of them,
+	// suppress the generic pre-build plan (upgrade prints its own report),
+	// and override the release channel for this invocation.
+	deferInstall bool
+	skipPlan     bool
+	channel      string
 }
 
 // parseInstallArgs separates flags from package names.
@@ -182,8 +206,7 @@ func Run(args []string) error {
 		targets, o := parseInstallArgs(rest)
 		return withArgs(cmd, targets, func(t []string) error { return cmdBuildInstall(t, true, o) })
 	case "upgrade":
-		targets, o := parseInstallArgs(rest)
-		return cmdUpgrade(targets, o)
+		return cmdUpgrade(rest)
 	case "remove":
 		return cmdRemove(rest)
 	case "list":
@@ -204,6 +227,8 @@ func Run(args []string) error {
 		return cmdSBOM(rest)
 	case "log":
 		return cmdLog(rest)
+	case "channel":
+		return cmdChannel(rest)
 	case "recover":
 		return cmdRecover()
 	case "mkindex":
@@ -241,7 +266,13 @@ func contains(names []string, name string) bool {
 }
 
 func requireRepos(cfg config.Config) error {
+	if !config.ValidChannel(cfg.Channel) {
+		return fmt.Errorf("invalid release channel %q (use stable, testing or unstable)", cfg.Channel)
+	}
 	if len(cfg.Repos) == 0 {
+		if cfg.ChannelMissing {
+			return fmt.Errorf("release channel %q is not installed under %s (run \"zpkg sync\" to add it)", cfg.Channel, cfg.RecipeRoot)
+		}
 		return fmt.Errorf("no recipe repos found: set ZPKG_REPOS or install the /usr/share/zignos/recipes tree")
 	}
 	return nil

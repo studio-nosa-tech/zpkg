@@ -55,6 +55,7 @@ type Package struct {
 type Recipe struct {
 	Repo       string `json:"repo"`
 	Dir        string `json:"dir"`
+	Channel    string `json:"channel,omitempty"`
 	Digest     string `json:"digest"`
 	KeyID      string `json:"keyid,omitempty"`
 	Generation int64  `json:"generation,omitempty"`
@@ -261,6 +262,7 @@ func FromMeta(rec *pkgdb.Rec) *Info {
 	}
 	m := rec.Meta
 	info.Package = Package{Name: m.Name, Version: m.Version, Revision: m.Revision, Slot: m.Slot, Arch: m.Arch}
+	info.Recipe.Channel = m.Channel
 	info.Build = Build{
 		Use:              append([]string{}, m.UseFlags...),
 		Sandbox:          m.BuildSandbox,

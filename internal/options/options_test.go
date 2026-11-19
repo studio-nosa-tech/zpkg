@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -156,5 +157,35 @@ func TestSavePackageUse(t *testing.T) {
 	o, _ = Load(root)
 	if len(o.PackageTokens("vim")) != 0 {
 		t.Error("vim line should be removed")
+	}
+}
+
+func TestSetVarPreservesOtherLines(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "etc", "zpkg", "make.conf")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("# build flags\nCFLAGS=-O2\nMAKEOPTS=-j8\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetVar(path, "CHANNEL", "testing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetVar(path, "CFLAGS", "-O3"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{"# build flags", "CFLAGS=-O3", "MAKEOPTS=-j8", "CHANNEL=testing"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "CFLAGS=-O2") {
+		t.Error("old CFLAGS value survived")
 	}
 }
