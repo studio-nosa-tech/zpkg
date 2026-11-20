@@ -16,6 +16,7 @@ import (
 	"github.com/studio-nosa-tech/zpkg/internal/config"
 	"github.com/studio-nosa-tech/zpkg/internal/depspec"
 	"github.com/studio-nosa-tech/zpkg/internal/pkgdb"
+	"github.com/studio-nosa-tech/zpkg/internal/provenance"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 	"github.com/studio-nosa-tech/zpkg/internal/resolve"
 	"github.com/studio-nosa-tech/zpkg/internal/version"
@@ -27,7 +28,7 @@ type Kind string
 const (
 	KindInstall   Kind = "install"   // dependency not installed yet
 	KindUpgrade   Kind = "upgrade"   // newer recipe version
-	KindRebuild   Kind = "rebuild"   // same version, USE flags changed (--newuse)
+	KindRebuild   Kind = "rebuild"   // same version, USE flags or recipe content changed
 	KindDowngrade Kind = "downgrade" // recipe version is older (channel switch)
 )
 
@@ -176,6 +177,8 @@ func Build(cfg config.Config, db pkgdb.DB, targets []string, opts Options) (*Pla
 				e.Kind = KindDowngrade
 			case opts.NewUse && useFlagsChanged(rec, cfg):
 				e.Kind = KindRebuild
+			case recipeChanged(rec, r):
+				e.Kind = KindRebuild
 			default:
 				continue // up to date
 			}
@@ -318,6 +321,21 @@ func activeDeps(raws, use []string) map[string]string {
 		}
 	}
 	return out
+}
+
+// recipeChanged reports whether the installed package was built from a
+// different recipe than the one now selected. Versions can stay equal across
+// channels (LTS backports) while the recipe content differs; such a package
+// must be rebuilt so the channel switch is real.
+func recipeChanged(rec *pkgdb.Rec, r *recipe.Recipe) bool {
+	if rec.Meta == nil || rec.Meta.RecipeDigest == "" || r.Dir == "" {
+		return false
+	}
+	digest, err := provenance.RecipeDigest(r.Dir)
+	if err != nil || digest == "" {
+		return false
+	}
+	return rec.Meta.RecipeDigest != digest
 }
 
 func fillDependencyDiff(e *Entry, use []string) {

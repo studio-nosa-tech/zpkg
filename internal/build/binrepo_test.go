@@ -9,6 +9,7 @@ import (
 	"github.com/studio-nosa-tech/zpkg/internal/config"
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
 	"github.com/studio-nosa-tech/zpkg/internal/options"
+	"github.com/studio-nosa-tech/zpkg/internal/provenance"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 	"github.com/studio-nosa-tech/zpkg/internal/sign"
 )
@@ -29,7 +30,7 @@ func packTo(t *testing.T, cache, usehash string) *recipe.Recipe {
 	}
 	r := &recipe.Recipe{Name: "hello", Version: "1.0.0", Revision: 2, Depends: []string{"glibc"}}
 	res := &Result{Recipe: r, Destroot: root, Entries: entries}
-	if _, err := PackBinpkg(r, res, cache, usehash); err != nil {
+	if _, err := PackBinpkg(r, res, cache, usehash, ""); err != nil {
 		t.Fatal(err)
 	}
 	return r
@@ -236,5 +237,88 @@ func TestSignedRepoExpiry(t *testing.T) {
 	cfg.AllowExpired = true
 	if _, err := LoadRepoBinpkg(r, cfg); err != nil {
 		t.Fatalf("allow expired: %v", err)
+	}
+}
+
+func TestRepoLoadRejectsChannelAndDigestMismatch(t *testing.T) {
+	recipeDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(recipeDir, "version"), []byte("1.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	build := filepath.Join(recipeDir, "build")
+	if err := os.WriteFile(build, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	p := filepath.Join(root, "usr/bin/hello")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("hello"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := manifest.FromRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := provenance.RecipeDigest(recipeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &recipe.Recipe{Name: "hello", Version: "1.0.0", Dir: recipeDir}
+	res := &Result{Recipe: r, Destroot: root, Entries: entries, RecipeDigest: digest}
+
+	cache := t.TempDir()
+	if _, err := PackBinpkg(r, res, cache, "", "stable"); err != nil {
+		t.Fatal(err)
+	}
+	repo := t.TempDir()
+	cacheBin := filepath.Join(cache, "binpkgs")
+	items, err := os.ReadDir(cacheBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		data, err := os.ReadFile(filepath.Join(cacheBin, it.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, it.Name()), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := MakeIndex(repo); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{Cache: t.TempDir(), DB: t.TempDir(), BinRepo: repo, AllowUnsigned: true, Channel: "testing"}
+	got, err := LoadRepoBinpkg(r, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatal("repository package from another channel was accepted")
+	}
+
+	cfg.Channel = "stable"
+	got, err = LoadRepoBinpkg(r, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("same-channel repository package not restored")
+	}
+
+	// Same version, different recipe content: the index entry must no longer
+	// match.
+	if err := os.WriteFile(build, []byte("#!/bin/sh\necho changed\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err = LoadRepoBinpkg(r, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatal("repository package with a stale recipe digest was accepted")
 	}
 }

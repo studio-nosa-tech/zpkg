@@ -55,6 +55,11 @@ type Meta struct {
 	BuildNetwork  string `json:"build_network,omitempty"` // "on" or "off"
 	BuildEnvHash  string `json:"build_env_hash,omitempty"`
 	BuildEnvCount int    `json:"build_env_count,omitempty"`
+
+	// RecipeDigest is the content digest of the recipe that produced this
+	// package. It lets an upgrade rebuild a package whose version did not
+	// change but whose recipe did (for example a channel backport).
+	RecipeDigest string `json:"recipe_digest,omitempty"`
 }
 
 // Rec is one installed package record.
@@ -196,6 +201,30 @@ func (db DB) Owner(path string) (Ref, error) {
 		}
 	}
 	return Ref{}, nil
+}
+
+// OwnerIndex loads every installed record once and returns path -> owner.
+// Package installs check tens of thousands of paths; calling Owner for each
+// one re-reads all records every time and turns the conflict check into an
+// O(paths x packages) operation (breeze-icons has ~28k files).
+func (db DB) OwnerIndex() (map[string]Ref, error) {
+	refs, err := db.List()
+	if err != nil {
+		return nil, err
+	}
+	index := make(map[string]Ref)
+	for _, ref := range refs {
+		rec, err := db.Get(ref.Name, ref.Slot)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range rec.Entries {
+			if _, exists := index[e.Path]; !exists {
+				index[e.Path] = ref
+			}
+		}
+	}
+	return index, nil
 }
 
 // Save writes a record atomically.

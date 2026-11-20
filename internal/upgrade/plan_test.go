@@ -11,6 +11,7 @@ import (
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
 	"github.com/studio-nosa-tech/zpkg/internal/options"
 	"github.com/studio-nosa-tech/zpkg/internal/pkgdb"
+	"github.com/studio-nosa-tech/zpkg/internal/provenance"
 )
 
 func writeRecipe(t *testing.T, repo, name, version string, deps, makedeps []string) {
@@ -239,4 +240,44 @@ func containsString(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestPlanRebuildsWhenRecipeChangesAtSameVersion(t *testing.T) {
+	repo := t.TempDir()
+	writeRecipe(t, repo, "app", "1.0", nil, nil)
+	dir := filepath.Join(repo, "app")
+	digest, err := provenance.RecipeDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db := pkgdb.DB{Dir: t.TempDir()}
+	rec := &pkgdb.Rec{Name: "app", Slot: "0", Version: "1.0",
+		Meta: &pkgdb.Meta{Schema: pkgdb.Schema, Name: "app", Version: "1.0",
+			Slot: "0", RecipeDigest: digest}}
+	if err := db.Save(rec); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Repos: []string{repo}, Channel: "stable", Options: testOptions(t)}
+
+	plan, err := Build(cfg, db, []string{"app"}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Entries) != 0 {
+		t.Fatalf("unchanged recipe planned %d changes, want 0", len(plan.Entries))
+	}
+
+	// Same version, different recipe content: a channel switch/backport must
+	// rebuild the package instead of skipping it as up to date.
+	if err := os.WriteFile(filepath.Join(dir, "build"), []byte("#!/bin/sh\necho changed\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = Build(cfg, db, []string{"app"}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Entries) != 1 || plan.Entries[0].Kind != KindRebuild {
+		t.Fatalf("entries = %+v, want one rebuild", plan.Entries)
+	}
 }

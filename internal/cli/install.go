@@ -23,21 +23,26 @@ import (
 // metaFromRecipe captures the provenance of an install so later upgrades
 // and queries do not need to re-read the recipe tree.
 func metaFromRecipe(r *recipe.Recipe, use []string, channel string) *pkgdb.Meta {
+	digest := ""
+	if r.Dir != "" {
+		digest, _ = provenance.RecipeDigest(r.Dir)
+	}
 	return &pkgdb.Meta{
-		Schema:    pkgdb.Schema,
-		Name:      r.Name,
-		Version:   r.Version,
-		Revision:  r.Revision,
-		Slot:      r.Slot,
-		Repo:      r.Repo,
-		Channel:   channel,
-		Arch:      runtime.GOARCH,
-		Installed: time.Now().UTC().Format(time.RFC3339),
-		UseFlags:  append([]string{}, use...),
-		Depends:   append([]string{}, r.Depends...),
-		BuildDeps: append([]string{}, r.MakeDepends...),
-		Provides:  append([]string{}, r.Provides...),
-		Conflicts: append([]string{}, r.Conflicts...),
+		Schema:       pkgdb.Schema,
+		Name:         r.Name,
+		Version:      r.Version,
+		Revision:     r.Revision,
+		Slot:         r.Slot,
+		Repo:         r.Repo,
+		Channel:      channel,
+		Arch:         runtime.GOARCH,
+		Installed:    time.Now().UTC().Format(time.RFC3339),
+		UseFlags:     append([]string{}, use...),
+		Depends:      append([]string{}, r.Depends...),
+		BuildDeps:    append([]string{}, r.MakeDepends...),
+		Provides:     append([]string{}, r.Provides...),
+		Conflicts:    append([]string{}, r.Conflicts...),
+		RecipeDigest: digest,
 	}
 }
 
@@ -192,7 +197,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 			if _, envHash, envCount := provenance.InstalledEnvironment(db); envCount > 0 {
 				res.BuildEnvHash, res.BuildEnvCount = envHash, envCount
 			}
-			if _, err := build.PackBinpkg(r, res, cfg.Cache, opts.Hash()); err != nil {
+			if _, err := build.PackBinpkg(r, res, cfg.Cache, opts.Hash(), cfg.Channel); err != nil {
 				fmt.Fprintln(os.Stderr, "zpkg: binpkg pack failed:", err)
 			} else {
 				phase("Packed binpkg %s", res.ArtifactPath)
@@ -210,7 +215,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 				if _, envHash, envCount := provenance.InstalledEnvironment(db); envCount > 0 {
 					second.BuildEnvHash, second.BuildEnvCount = envHash, envCount
 				}
-				if _, err := build.PackBinpkg(r, second, cfg.Cache, opts.Hash()); err != nil {
+				if _, err := build.PackBinpkg(r, second, cfg.Cache, opts.Hash(), cfg.Channel); err != nil {
 					return err
 				}
 				diffs := diffEntries(res.Entries, second.Entries)

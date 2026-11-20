@@ -111,7 +111,7 @@ func isArchive(name string) bool {
 // PackBinpkg writes a binary package — a gzipped tar of the destroot — and
 // a sidecar manifest into cacheDir/binpkgs, named <name>-<version>. This is
 // the local equivalent of Portage's buildpkg output.
-func PackBinpkg(r *recipe.Recipe, res *Result, cacheDir, optsHash string) (string, error) {
+func PackBinpkg(r *recipe.Recipe, res *Result, cacheDir, optsHash, channel string) (string, error) {
 	dir := filepath.Join(cacheDir, "binpkgs")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
@@ -193,7 +193,7 @@ func PackBinpkg(r *recipe.Recipe, res *Result, cacheDir, optsHash string) (strin
 	if err := manifest.Write(manifestPath, res.Entries); err != nil {
 		return "", err
 	}
-	if err := writeBinMeta(dir, base, r, optsHash, res); err != nil {
+	if err := writeBinMeta(dir, base, r, optsHash, channel, res); err != nil {
 		return "", err
 	}
 
@@ -225,6 +225,29 @@ func LoadBinpkg(r *recipe.Recipe, cfg config.Config) *Result {
 	}
 	dir := filepath.Join(cfg.Cache, "binpkgs")
 	base := PackageBase(r, cfg.Options.ForPackage(r.Name).Hash())
+	data, err := os.ReadFile(filepath.Join(dir, base+".meta.json"))
+	if err != nil {
+		return nil
+	}
+	var m BinMeta
+	if json.Unmarshal(data, &m) != nil {
+		return nil
+	}
+	// The cache key has no channel or recipe-content component. A binpkg is
+	// only valid for the exact recipe that produced it; otherwise a channel
+	// switch could silently install another channel's build (for example an
+	// LTS backport that kept the same version).
+	if want := recipeDigestFor(r); want != "" && m.RecipeDigest != want {
+		return nil
+	}
+	// The recipe digest cannot see dependency versions, so the same recipe
+	// built on two channels (Qt 6.11 vs 6.12, for example) produces different
+	// binaries under the same cache key. Only reuse a binpkg from the
+	// selected channel. Legacy entries without a channel predate channel
+	// separation and belong to the stable tree.
+	if m.Channel != cfg.Channel && !(m.Channel == "" && cfg.Channel == "stable") {
+		return nil
+	}
 	entries, err := manifest.Read(filepath.Join(dir, base+".manifest"))
 	if err != nil {
 		return nil
@@ -250,26 +273,34 @@ func LoadBinpkg(r *recipe.Recipe, cfg config.Config) *Result {
 		OriginKind:      "binpkg",
 		OriginRepo:      dir,
 		OriginPkgSHA256: sum,
-	}
-	if data, err := os.ReadFile(filepath.Join(dir, base+".meta.json")); err == nil {
-		var m BinMeta
-		if json.Unmarshal(data, &m) == nil {
-			res.Sandbox = m.Sandbox
-			res.Network = m.Network == "on"
-			res.BuildEnvHash = m.BuildEnvHash
-			res.BuildEnvCount = m.BuildEnvCount
-			res.RecipeDigest = m.RecipeDigest
-			res.SourceDateEpoch = m.SourceDateEpoch
-			res.ArtifactSHA256 = m.ArtifactSHA256
-			res.ArtifactSize = m.ArtifactSize
-			res.ManifestSHA256 = m.ManifestSHA256
-			res.LogSHA256 = m.LogSHA256
-		}
+		Sandbox:         m.Sandbox,
+		Network:         m.Network == "on",
+		BuildEnvHash:    m.BuildEnvHash,
+		BuildEnvCount:   m.BuildEnvCount,
+		RecipeDigest:    m.RecipeDigest,
+		SourceDateEpoch: m.SourceDateEpoch,
+		ArtifactSHA256:  m.ArtifactSHA256,
+		ArtifactSize:    m.ArtifactSize,
+		ManifestSHA256:  m.ManifestSHA256,
+		LogSHA256:       m.LogSHA256,
 	}
 	if res.ArtifactSHA256 == "" {
 		res.ArtifactSHA256 = sum
 	}
 	return res
+}
+
+// recipeDigestFor returns the content digest of a recipe tree, or "" when
+// the recipe has no directory (unit tests) or cannot be read.
+func recipeDigestFor(r *recipe.Recipe) string {
+	if r == nil || r.Dir == "" {
+		return ""
+	}
+	d, err := provenance.RecipeDigest(r.Dir)
+	if err != nil {
+		return ""
+	}
+	return d
 }
 
 // Run fetches, verifies and extracts sources, then executes the build script

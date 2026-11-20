@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/studio-nosa-tech/zpkg/internal/config"
 	"github.com/studio-nosa-tech/zpkg/internal/hash"
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
+	"github.com/studio-nosa-tech/zpkg/internal/provenance"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 	"github.com/studio-nosa-tech/zpkg/internal/source"
 )
@@ -39,7 +41,7 @@ func TestPackBinpkgRoundtrip(t *testing.T) {
 	res := &Result{Recipe: r, Destroot: root, Entries: entries}
 
 	cache := t.TempDir()
-	pkgPath, err := PackBinpkg(r, res, cache, "")
+	pkgPath, err := PackBinpkg(r, res, cache, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +82,7 @@ func TestPackBinpkgNormalizesTimestamps(t *testing.T) {
 	res := &Result{Recipe: r, Destroot: root, Entries: entries, SourceDateEpoch: 946684800}
 
 	cache := t.TempDir()
-	pkgPath, err := PackBinpkg(r, res, cache, "")
+	pkgPath, err := PackBinpkg(r, res, cache, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,5 +130,95 @@ func TestPackBinpkgNormalizesTimestamps(t *testing.T) {
 	manSum, err := hash.File(filepath.Join(cache, "binpkgs", "hello-1.0.0.manifest"))
 	if err != nil || manSum != res.ManifestSHA256 {
 		t.Fatalf("manifest sha256 = %q, want %q (%v)", res.ManifestSHA256, manSum, err)
+	}
+}
+
+func TestLoadBinpkgRejectsOtherChannel(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "usr/bin/hello")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("hello"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := manifest.FromRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &recipe.Recipe{Name: "hello", Version: "1.0.0"}
+	res := &Result{Recipe: r, Destroot: root, Entries: entries}
+
+	cache := t.TempDir()
+	if _, err := PackBinpkg(r, res, cache, "", "testing"); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadBinpkg(r, config.Config{Cache: cache, Channel: "testing"}); got == nil {
+		t.Fatal("binpkg not restored for its own channel")
+	}
+	if got := LoadBinpkg(r, config.Config{Cache: cache, Channel: "unstable"}); got != nil {
+		t.Fatal("binpkg reused across channels")
+	}
+
+	// Entries created before the channel field existed belong to stable.
+	cache2 := t.TempDir()
+	if _, err := PackBinpkg(r, res, cache2, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadBinpkg(r, config.Config{Cache: cache2, Channel: "stable"}); got == nil {
+		t.Fatal("legacy binpkg not restored for stable")
+	}
+	if got := LoadBinpkg(r, config.Config{Cache: cache2, Channel: "testing"}); got != nil {
+		t.Fatal("legacy binpkg reused for a non-stable channel")
+	}
+}
+
+func TestLoadBinpkgRejectsRecipeDigestMismatch(t *testing.T) {
+	recipeDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(recipeDir, "version"), []byte("1.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	build := filepath.Join(recipeDir, "build")
+	if err := os.WriteFile(build, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	p := filepath.Join(root, "usr/bin/hello")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("hello"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := manifest.FromRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := provenance.RecipeDigest(recipeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &recipe.Recipe{Name: "hello", Version: "1.0.0", Dir: recipeDir}
+	res := &Result{Recipe: r, Destroot: root, Entries: entries, RecipeDigest: digest}
+
+	cache := t.TempDir()
+	if _, err := PackBinpkg(r, res, cache, "", "stable"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Cache: cache, Channel: "stable"}
+	if got := LoadBinpkg(r, cfg); got == nil {
+		t.Fatal("binpkg not restored for matching recipe")
+	} else if got.RecipeDigest != digest {
+		t.Fatalf("restored digest = %q, want %q", got.RecipeDigest, digest)
+	}
+
+	// Same version, different recipe content: the cached binpkg must not be
+	// reused (this is the channel-backport case).
+	if err := os.WriteFile(build, []byte("#!/bin/sh\necho changed\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadBinpkg(r, cfg); got != nil {
+		t.Fatal("binpkg reused after recipe content changed")
 	}
 }

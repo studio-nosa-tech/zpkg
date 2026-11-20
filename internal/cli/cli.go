@@ -10,7 +10,7 @@ import (
 )
 
 // Version is the zpkg release version shipped by this source tree.
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 const usage = `zpkg - ZIGNOS package manager (v` + Version + `)
 

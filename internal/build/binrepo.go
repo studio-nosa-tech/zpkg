@@ -48,6 +48,7 @@ type BinMeta struct {
 	Revision int      `json:"revision"`
 	UseHash  string   `json:"usehash"` // options hash, "" when no options were set
 	Arch     string   `json:"arch"`
+	Channel  string   `json:"channel,omitempty"`
 	Depends  []string `json:"depends,omitempty"`
 
 	Sandbox       string `json:"sandbox,omitempty"`
@@ -71,7 +72,7 @@ func binMetaName(base string) string { return base + ".meta.json" }
 // writeBinMeta writes the sidecar next to a packed binary package. Recipe
 // deps are captured so the index (and therefore consumers) can record them
 // without the recipe tree.
-func writeBinMeta(dir, base string, r *recipe.Recipe, optsHash string, res *Result) error {
+func writeBinMeta(dir, base string, r *recipe.Recipe, optsHash, channel string, res *Result) error {
 	m := BinMeta{
 		Schema:   binMetaSchema,
 		Name:     r.Name,
@@ -79,6 +80,7 @@ func writeBinMeta(dir, base string, r *recipe.Recipe, optsHash string, res *Resu
 		Revision: r.Revision,
 		UseHash:  optsHash,
 		Arch:     runtime.GOARCH,
+		Channel:  channel,
 		Depends:  append([]string{}, r.Depends...),
 	}
 	if res != nil {
@@ -99,6 +101,9 @@ func writeBinMeta(dir, base string, r *recipe.Recipe, optsHash string, res *Resu
 		m.ManifestSHA256 = res.ManifestSHA256
 		m.LogSHA256 = res.LogSHA256
 	}
+	if m.RecipeDigest == "" {
+		m.RecipeDigest = recipeDigestFor(r)
+	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
@@ -113,6 +118,8 @@ type IndexEntry struct {
 	Revision       int      `json:"revision"`
 	UseHash        string   `json:"usehash"`
 	Arch           string   `json:"arch"`
+	Channel        string   `json:"channel,omitempty"`
+	RecipeDigest   string   `json:"recipe_digest,omitempty"`
 	Sha256         string   `json:"sha256"`
 	ManifestSha256 string   `json:"manifest_sha256,omitempty"`
 	Size           int64    `json:"size"`
@@ -323,6 +330,8 @@ func indexEntry(dir string, f pkgFile, signed bool) (IndexEntry, error) {
 			entry.Revision = meta.Revision
 			entry.UseHash = meta.UseHash
 			entry.Arch = meta.Arch
+			entry.Channel = meta.Channel
+			entry.RecipeDigest = meta.RecipeDigest
 			entry.Depends = meta.Depends
 		}
 	}
@@ -559,9 +568,19 @@ func loadRepoBinpkgImpl(r *recipe.Recipe, binRepo, cacheDir, optsHash string, cf
 	if err != nil {
 		return nil, err
 	}
+	wantDigest := recipeDigestFor(r)
 	for _, e := range idx.Packages {
 		if e.Name != r.Name || (e.Arch != "" && e.Arch != runtime.GOARCH) ||
 			recipeKey(e.Version, e.Revision) != r.FullVersion() || e.UseHash != optsHash {
+			continue
+		}
+		// New indexes carry the channel and recipe digest. Legacy indexes
+		// have neither, so they remain usable while channels are still
+		// identical, but a mismatching entry is never accepted.
+		if e.Channel != "" && cfg.Channel != "" && e.Channel != cfg.Channel {
+			continue
+		}
+		if wantDigest != "" && e.RecipeDigest != "" && e.RecipeDigest != wantDigest {
 			continue
 		}
 		pkgPath, err := fetchRepoFileVerified(binRepo, e.Filename, cacheDir, e.Sha256)

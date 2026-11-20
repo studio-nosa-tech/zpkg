@@ -83,3 +83,33 @@ func TestGetV1Record(t *testing.T) {
 		t.Errorf("VersionString = %q", rec.VersionString())
 	}
 }
+
+func TestOwnerIndex(t *testing.T) {
+	db := DB{Dir: t.TempDir()}
+	for _, rec := range []*Rec{
+		{Name: "one", Version: "1", Entries: []manifest.Entry{
+			{Kind: "file", Path: "usr/bin/one", Hash: "x"},
+			{Kind: "file", Path: "usr/share/one", Hash: "x"},
+		}},
+		{Name: "two", Version: "1", Entries: []manifest.Entry{
+			{Kind: "file", Path: "usr/bin/two", Hash: "x"},
+		}},
+	} {
+		if err := db.Save(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idx, err := db.OwnerIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := idx["usr/bin/one"].Name; got != "one" {
+		t.Errorf("usr/bin/one owner = %q", got)
+	}
+	if got := idx["usr/bin/two"].Name; got != "two" {
+		t.Errorf("usr/bin/two owner = %q", got)
+	}
+	if _, ok := idx["usr/bin/missing"]; ok {
+		t.Error("missing path should not be indexed")
+	}
+}

@@ -26,15 +26,16 @@ func Apply(rec *pkgdb.Rec, destroot, root string, db pkgdb.DB) error {
 
 	// Reject any file owned by another package or another slot of the same
 	// package (slots must not overlap files; same name+slot is an upgrade).
+	owners, err := db.OwnerIndex()
+	if err != nil {
+		return err
+	}
 	for _, e := range rec.Entries {
 		if e.Kind == "dir" || manifest.Ignored(e.Path) {
 			continue
 		}
-		owner, err := db.Owner(e.Path)
-		if err != nil {
-			return err
-		}
-		if owner.Name != "" && (owner.Name != rec.Name || owner.Slot != rec.Slot) {
+		owner, ok := owners[e.Path]
+		if ok && (owner.Name != rec.Name || owner.Slot != rec.Slot) {
 			return fmt.Errorf("%s: already owned by %s", e.Path, owner.String())
 		}
 	}
