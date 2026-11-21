@@ -65,7 +65,7 @@ Total: 2 packages (1 target, 1 dependency)
 | `search <term>` | レシピ検索 |
 | `use [flag\|-flag]...` / `use --package <pkg> ...` | USE フラグの表示・編集(グローバル / package.use) |
 | `mkindex [--key <private>] [--generation N] [--expires ...] [dir]` | binpkg リポジトリ用 `index.json` を生成。`--key` で署名し `keys/<keyid>.pub` も出力 |
-| `sync [--from <src>] [--dest <dir>] [-n] [--allow-unsigned]` | レシピツリー全体を stage3/レシピ tarball・ディレクトリ・URL から置換。署名付き `recipes.manifest` を検証 |
+| `sync [--from <src>] [--dest <dir>] [--git] [--branch <name>] [-n] [--allow-unsigned]` | レシピツリー全体を stage3/レシピ tarball・ディレクトリ・URL・git リポジトリから置換。署名付き `recipes.manifest` を検証 |
 | `key generate --private <path> [--public <path>]` | Ed25519 署名鍵ペアを生成(秘密鍵 0600) |
 | `key import <pubkey>...` | 公開鍵を trusted.d に登録 |
 | `key list` / `key remove <keyid>` | 信頼済み鍵の一覧 / 削除 |
@@ -101,6 +101,21 @@ zpkg sync --from https://example.invalid/zignos-recipes.tar.xz
 # 検証だけ
 zpkg sync --from ./zignos-recipes -n
 ```
+
+git リポジトリを既定の取得元にする場合は `--git` を付ける。stage3 の
+`/etc/zpkg/sync.conf` は既定で GitHub のレシピリポジトリを指す。
+
+```sh
+zpkg sync --git
+zpkg sync --git --from https://github.com/studio-nosa-tech/zignos-recipes
+```
+
+git モードでは、置換先の `.zpkg-git` に記録した commit と
+`git ls-remote` のリモート HEAD を比較する。同じなら何も取得せず
+`Recipe tree is up to date` を表示し、変わっているときだけ shallow clone
+して検証後に原子的に置換する。`RECIPEGIT=1` / `RECIPEBRANCH=main` を
+`/etc/zpkg/sync.conf` に書けば `--git` を省略できる。private リポジトリは
+git の credential helper か SSH 鍵が必要。
 
 `--from` を省略すると `ZPKG_RECIPE_URL`、次に `/etc/zpkg/sync.conf` の
 `RECIPEURL=` を使う。`--dest` で置換先を変更できる(既定:
@@ -395,6 +410,9 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
 | `ZPKG_NO_BINPKG` | なし | `1` でローカル/リポジトリの binpkg を無効化 |
 | `ZPKG_BINREPO` | なし | binpkg リポジトリの URL/パス(`/etc/zpkg/binrepo.conf` の `BINREPO=` でも可) |
 | `ZPKG_RECIPE_URL` | なし | `zpkg sync` の既定ソース(URL/パス)。`/etc/zpkg/sync.conf` の `RECIPEURL=` でも可 |
+| `ZPKG_RECIPE_GIT` | `0` | `1` で既定ソースを git リポジトリとして取得(`RECIPEGIT=` でも可) |
+| `ZPKG_RECIPE_BRANCH` | `main` | git ソースのブランチ(`RECIPEBRANCH=` でも可) |
+| `ZPKG_RECIPE_ALLOW_UNSIGNED` | `0` | `1` で git ソースの署名なしツリーを許可(`RECIPEALLOWUNSIGNED=` でも可。署名が壊れている場合は不可) |
 | `ZPKG_TRUSTED_KEYS` | `$ZPKG_ROOT/etc/zpkg/trusted.d` | 信頼する `*.pub` のディレクトリ(`security.conf` の `TRUSTED_KEYS=` でも可) |
 | `ZPKG_ALLOW_UNSIGNED` | なし | `1` で署名のない index/レシピツリーを許可(開発用。壊れた署名は不可) |
 | `ZPKG_ALLOW_EXPIRED` | なし | `1` で署名の期限切れだけ許可(復旧用) |
@@ -413,7 +431,7 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
 - `/etc/zpkg/package.use` — パッケージ単位の USE 上書き
 - `/etc/zpkg/make.conf` — `CFLAGS=` / `MAKEOPTS=` / `CHANNEL=stable|testing|unstable`
 - `/etc/zpkg/binrepo.conf` — `BINREPO=`
-- `/etc/zpkg/sync.conf` — `RECIPEURL=`(`zpkg sync` の既定ソース)
+- `/etc/zpkg/sync.conf` — `RECIPEURL=` / `RECIPEGIT=` / `RECIPEBRANCH=` / `RECIPEALLOWUNSIGNED=`(`zpkg sync` の既定ソース)
 - `/etc/zpkg/security.conf` — `TRUSTED_KEYS=` / `ALLOW_UNSIGNED=` / `ALLOW_EXPIRED=`
 - `/etc/zpkg/sandbox.conf` — `SANDBOX=` / `BUILD_NET=` / `BWRAP=`
 - `/etc/zpkg/build.conf` — `SOURCE_DATE_EPOCH=` / `BUILD_LOG=` / `SBOM=`

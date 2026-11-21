@@ -10,7 +10,7 @@ import (
 )
 
 // Version is the zpkg release version shipped by this source tree.
-const Version = "0.3.0"
+const Version = "0.3.1"
 
 const usage = `zpkg - ZIGNOS package manager (v` + Version + `)
 
@@ -51,13 +51,17 @@ Usage:
   zpkg search <term>          search recipe repos
   zpkg mkindex [dir]          write index.json for a binary package
                               repository dir (default: the local binpkg cache)
-  zpkg sync [--from <src>] [--dest <dir>] [-n] [--allow-unsigned]
+  zpkg sync [--from <src>] [--dest <dir>] [--git] [--branch <name>]
+            [-n] [--allow-unsigned]
                               replace the recipe tree from a stage3 tarball,
-                              recipe tarball, directory or URL
+                              recipe tarball, directory, URL or git repository
                               --from  source; default $ZPKG_RECIPE_URL or
                                       RECIPEURL in /etc/zpkg/sync.conf
                               --dest  target tree (default $ZPKG_ROOT/usr/
                                       share/zignos/recipes)
+                              --git   treat the source as a git repository
+                                      (also RECIPEGIT=1 in sync.conf)
+                              --branch  git branch (default main / RECIPEBRANCH)
                               -n      validate and count only
                               --allow-unsigned  accept a tree with no manifest
                                                 or signature (development)
@@ -103,6 +107,12 @@ Environment:
                   and binary repositories)
   ZPKG_RECIPE_URL default source for "zpkg sync" (URL or path); overrides
                   RECIPEURL in /etc/zpkg/sync.conf
+  ZPKG_RECIPE_GIT  set to 1 to fetch the recipe source as a git repository
+                  (or RECIPEGIT=1 in sync.conf)
+  ZPKG_RECIPE_BRANCH  git branch for the recipe source (default main;
+                  or RECIPEBRANCH= in sync.conf)
+  ZPKG_RECIPE_ALLOW_UNSIGNED  allow an unsigned tree from the git recipe
+                  source (or RECIPEALLOWUNSIGNED=1 in sync.conf)
   ZPKG_BINREPO    base URL/path of a binary package repository; install
                   tries a matching package from it before building from
                   source (or set BINREPO= in /etc/zpkg/binrepo.conf). A

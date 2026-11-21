@@ -478,3 +478,125 @@ func TestSyncRecipesChannelArchive(t *testing.T) {
 		t.Fatalf("testing archive recipe missing: %v", err)
 	}
 }
+
+func requireGit(t *testing.T) string {
+	t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	return git
+}
+
+func initGitRepo(t *testing.T, git, dir string) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init", "-q", "-b", "main"},
+		{"config", "user.email", "test@example.invalid"},
+		{"config", "user.name", "zpkg test"},
+	} {
+		cmd := exec.Command(git, args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+}
+
+func commitAll(t *testing.T, git, dir, msg string) string {
+	t.Helper()
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-q", "-m", msg}} {
+		cmd := exec.Command(git, args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	cmd := exec.Command(git, "rev-parse", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func TestSyncGitRecipesCompareAndUpdate(t *testing.T) {
+	git := requireGit(t)
+	repo := t.TempDir()
+	initGitRepo(t, git, repo)
+	writeRecipe(t, repo, "core", "foo", "1")
+	writeRecipe(t, repo, "main", "bar", "2")
+	first := commitAll(t, git, repo, "first")
+
+	dest := t.TempDir()
+	cfg := testSyncConfig(t)
+	stats, err := syncGitRecipes(cfg, repo, "main", dest, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.unchanged || stats.commit != first {
+		t.Fatalf("stats = %+v, want changed commit %s", stats, first)
+	}
+	stamp, err := readGitStamp(dest)
+	if err != nil || stamp.Commit != first || stamp.Branch != "main" || stamp.Remote != repo {
+		t.Fatalf("stamp = %+v, %v", stamp, err)
+	}
+
+	// Same remote commit: no clone, no replacement.
+	stats, err = syncGitRecipes(cfg, repo, "main", dest, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stats.unchanged || stats.commit != first {
+		t.Fatalf("second stats = %+v, want unchanged %s", stats, first)
+	}
+
+	// A new commit is fetched and replaces the tree.
+	writeRecipe(t, repo, "core", "newpkg", "3")
+	second := commitAll(t, git, repo, "second")
+	stats, err = syncGitRecipes(cfg, repo, "main", dest, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.unchanged || stats.commit != second {
+		t.Fatalf("third stats = %+v, want changed commit %s", stats, second)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "core", "newpkg", "version")); err != nil {
+		t.Fatalf("new recipe missing after update: %v", err)
+	}
+	if got, err := readGitStamp(dest); err != nil || got.Commit != second {
+		t.Fatalf("updated stamp = %+v, %v", got, err)
+	}
+}
+
+func TestSyncGitRecipesDryRunDoesNotTouchTree(t *testing.T) {
+	git := requireGit(t)
+	repo := t.TempDir()
+	initGitRepo(t, git, repo)
+	writeRecipe(t, repo, "core", "foo", "1")
+	writeRecipe(t, repo, "main", "bar", "2")
+	commitAll(t, git, repo, "first")
+
+	dest := t.TempDir()
+	writeRecipe(t, dest, "core", "old", "0")
+	if _, err := syncGitRecipes(testSyncConfig(t), repo, "main", dest, true, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "core", "old", "version")); err != nil {
+		t.Fatalf("dry run replaced the tree: %v", err)
+	}
+}
+
+func TestParseGitSyncArgs(t *testing.T) {
+	o, err := parseSyncArgs([]string{"--git", "--branch", "dev", "--from", "https://example.invalid/r", "--allow-unsigned"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !o.git || o.branch != "dev" || o.from != "https://example.invalid/r" || !o.allowUnsigned {
+		t.Fatalf("options = %+v", o)
+	}
+	if !isGitSource("https://example.invalid/r.git") || !isGitSource("git@example.invalid:r") || isGitSource("https://example.invalid/r.tar.xz") {
+		t.Fatal("isGitSource detection is wrong")
+	}
+}

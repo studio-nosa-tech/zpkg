@@ -193,3 +193,29 @@ func TestApplyChannelAndTreeRoot(t *testing.T) {
 		t.Fatalf("custom tree root = %q", got)
 	}
 }
+
+func TestGitRecipeSyncConfig(t *testing.T) {
+	root := t.TempDir()
+	confDir := filepath.Join(root, "etc", "zpkg")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "sync.conf"),
+		[]byte("RECIPEURL=https://example.invalid/recipes\nRECIPEGIT=1\nRECIPEBRANCH=stable-branch\nRECIPEALLOWUNSIGNED=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZPKG_REPO_GIT", "")
+	t.Setenv("ZPKG_RECIPE_GIT", "")
+	t.Setenv("ZPKG_RECIPE_BRANCH", "")
+	t.Setenv("ZPKG_RECIPE_ALLOW_UNSIGNED", "")
+	cfg := loadTestConfig(t, root)
+	if cfg.RecipeURL != "https://example.invalid/recipes" ||
+		!cfg.RecipeGit || cfg.RecipeBranch != "stable-branch" || !cfg.RecipeAllowUnsigned {
+		t.Fatalf("git recipe config = %+v", cfg)
+	}
+	t.Setenv("ZPKG_RECIPE_GIT", "0")
+	cfg = loadTestConfig(t, root)
+	if cfg.RecipeGit {
+		t.Fatal("ZPKG_RECIPE_GIT=0 did not override sync.conf")
+	}
+}

@@ -15,13 +15,16 @@ import (
 
 // Config holds the runtime layout.
 type Config struct {
-	Repos     []string        // recipe repos, in search order (first match wins)
-	Root      string          // target system root, absolute
-	Cache     string          // source downloads and build workdirs
-	DB        string          // installed package database
-	Options   options.Options // USE flags and build options for Root
-	BinRepo   string          // binary package repository (URL or local dir), "" = none
-	RecipeURL string          // default source for "zpkg sync" (URL or path), "" = none
+	Repos               []string        // recipe repos, in search order (first match wins)
+	Root                string          // target system root, absolute
+	Cache               string          // source downloads and build workdirs
+	DB                  string          // installed package database
+	Options             options.Options // USE flags and build options for Root
+	BinRepo             string          // binary package repository (URL or local dir), "" = none
+	RecipeURL           string          // default source for "zpkg sync" (URL or path), "" = none
+	RecipeGit           bool            // fetch RecipeURL as a git repository
+	RecipeBranch        string          // git branch for RecipeURL (default "main")
+	RecipeAllowUnsigned bool            // allow an unsigned tree from the git recipe source
 
 	TrustedKeys   string // directory of trusted *.pub signing keys
 	AllowUnsigned bool   // accept unsigned repository/recipe metadata (development)
@@ -132,6 +135,21 @@ func Load() (Config, error) {
 		if cfg.RecipeURL, err = options.ReadVar(absRoot, "etc/zpkg/sync.conf", "RECIPEURL"); err != nil {
 			return Config{}, err
 		}
+	}
+	if cfg.RecipeGit, err = readConfBool(absRoot, "etc/zpkg/sync.conf", "ZPKG_RECIPE_GIT", "RECIPEGIT", false); err != nil {
+		return Config{}, err
+	}
+	cfg.RecipeBranch = os.Getenv("ZPKG_RECIPE_BRANCH")
+	if cfg.RecipeBranch == "" {
+		if cfg.RecipeBranch, err = options.ReadVar(absRoot, "etc/zpkg/sync.conf", "RECIPEBRANCH"); err != nil {
+			return Config{}, err
+		}
+	}
+	if cfg.RecipeBranch == "" {
+		cfg.RecipeBranch = "main"
+	}
+	if cfg.RecipeAllowUnsigned, err = readConfBool(absRoot, "etc/zpkg/sync.conf", "ZPKG_RECIPE_ALLOW_UNSIGNED", "RECIPEALLOWUNSIGNED", false); err != nil {
+		return Config{}, err
 	}
 	// Signing policy: trusted public keys and the two explicit escape
 	// hatches for development/recovery. Env wins over security.conf.

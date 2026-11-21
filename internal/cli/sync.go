@@ -19,12 +19,14 @@ import (
 )
 
 const syncUsage = `Usage:
-  zpkg sync [--from <dir|tarball|URL>] [--dest <dir>] [-n] [--allow-unsigned]
+  zpkg sync [--from <dir|tarball|URL>] [--dest <dir>] [--git] [--branch <name>]
+            [-n] [--allow-unsigned]
 
 Replace the recipe tree as a whole. The source may be:
   - a stage3 tarball (only usr/share/zignos/recipes is extracted)
   - a recipe-only tarball/directory
   - a directory containing usr/share/zignos/recipes
+  - a git repository (--git, or RECIPEGIT=1 in /etc/zpkg/sync.conf)
 
 The tree may have release channels (stable/, testing/, unstable/, each with
 core/ and main/) or the legacy flat layout (core/ and main/ at the top).
@@ -33,6 +35,10 @@ core/ and main/) or the legacy flat layout (core/ and main/ at the top).
 its recipes.manifest signature is verified against the trusted keys before
 the old tree is replaced. --allow-unsigned accepts a tree with no signature
 at all (development only; an invalid signature is always rejected).
+
+In git mode the commit recorded in <dest>/.zpkg-git is compared with the
+remote branch (git ls-remote). The tree is cloned and replaced only when the
+commit changed; an up-to-date tree is left untouched.
 `
 
 type syncOptions struct {
@@ -40,6 +46,8 @@ type syncOptions struct {
 	dest          string
 	dryRun        bool
 	allowUnsigned bool
+	git           bool
+	branch        string
 }
 
 type categoryCounts struct {
@@ -53,8 +61,10 @@ func (c categoryCounts) total() int { return c.core + c.main + c.desktop }
 // syncStats is per channel. Legacy is true for a flat core/main tree
 // installed before release channels existed.
 type syncStats struct {
-	channels map[string]categoryCounts
-	legacy   bool
+	channels  map[string]categoryCounts
+	legacy    bool
+	unchanged bool
+	commit    string
 }
 
 func (s syncStats) total() int {
@@ -95,6 +105,14 @@ func parseSyncArgs(args []string) (syncOptions, error) {
 			o.dryRun = true
 		case a == "--allow-unsigned":
 			o.allowUnsigned = true
+		case a == "--git":
+			o.git = true
+		case a == "--branch":
+			if i+1 >= len(args) {
+				return o, fmt.Errorf("--branch needs an argument")
+			}
+			i++
+			o.branch = args[i]
 		case a == "--from" || a == "--dest":
 			if i+1 >= len(args) {
 				return o, fmt.Errorf("%s needs an argument", a)
@@ -109,6 +127,8 @@ func parseSyncArgs(args []string) (syncOptions, error) {
 			o.from = strings.TrimPrefix(a, "--from=")
 		case strings.HasPrefix(a, "--dest="):
 			o.dest = strings.TrimPrefix(a, "--dest=")
+		case strings.HasPrefix(a, "--branch="):
+			o.branch = strings.TrimPrefix(a, "--branch=")
 		case strings.HasPrefix(a, "-"):
 			return o, fmt.Errorf("unknown option %q", a)
 		default:
@@ -156,12 +176,26 @@ func cmdSync(args []string) error {
 		return err
 	}
 
+	branch := o.branch
+	if branch == "" {
+		branch = cfg.RecipeBranch
+	}
+	allowUnsigned := o.allowUnsigned || cfg.RecipeAllowUnsigned
 	phase("Syncing recipes from %s", from)
-	stats, err := syncRecipes(cfg, from, dest, o.allowUnsigned, o.dryRun)
+	var stats syncStats
+	if o.git || cfg.RecipeGit || isGitSource(from) {
+		stats, err = syncGitRecipes(cfg, from, branch, dest, allowUnsigned, o.dryRun)
+	} else {
+		stats, err = syncRecipes(cfg, from, dest, allowUnsigned, o.dryRun)
+	}
 	if err != nil {
 		return err
 	}
 	phase("Recipe tree: %s", stats.summary())
+	if stats.unchanged {
+		phase("Recipe tree is up to date (%s)", shortCommit(stats.commit))
+		return nil
+	}
 	if o.dryRun {
 		fmt.Printf("Would update %s\n", dest)
 		return nil
@@ -184,7 +218,6 @@ func syncRecipes(cfg config.Config, from, dest string, allowUnsigned, dryRun boo
 	}
 	defer os.RemoveAll(tmp)
 
-	staging := filepath.Join(tmp, "recipes")
 	extractDir := filepath.Join(tmp, "extract")
 
 	var srcRoot string
@@ -225,46 +258,30 @@ func syncRecipes(cfg config.Config, from, dest string, allowUnsigned, dryRun boo
 		}
 	}
 
+	return installRecipeTree(cfg, srcRoot, dest, allowUnsigned, dryRun, nil)
+}
+
+// installRecipeTree copies a resolved source tree into a staging directory,
+// validates it, and atomically swaps it with dest. A non-nil stamp records
+// the git source in .zpkg-git inside the new tree.
+func installRecipeTree(cfg config.Config, srcRoot, dest string, allowUnsigned, dryRun bool, stamp *gitStamp) (syncStats, error) {
+	tmp, err := os.MkdirTemp(filepath.Dir(dest), ".zignos-recipes-sync-")
+	if err != nil {
+		return syncStats{}, err
+	}
+	defer os.RemoveAll(tmp)
+	staging := filepath.Join(tmp, "recipes")
 	if err := copyTree(srcRoot, staging); err != nil {
 		return syncStats{}, err
 	}
-	stats, err := scanRecipeTree(staging)
+	if stamp != nil {
+		if err := writeGitStamp(staging, *stamp); err != nil {
+			return syncStats{}, err
+		}
+	}
+	stats, err := validateRecipeTree(cfg, staging, dest, allowUnsigned, dryRun)
 	if err != nil {
 		return stats, err
-	}
-
-	keys, err := sign.LoadKeyring(cfg.TrustedKeys)
-	if err != nil {
-		return stats, err
-	}
-	verified, err := recipesig.Verify(staging, keys, allowUnsigned || cfg.AllowUnsigned, cfg.AllowExpired)
-	if err != nil {
-		return stats, err
-	}
-	if verified == nil {
-		fmt.Fprintln(os.Stderr, "zpkg: warning: recipe tree is unsigned (allowed by --allow-unsigned / ZPKG_ALLOW_UNSIGNED)")
-	} else if cfg.DB != "" {
-		statePath := filepath.Join(cfg.DB, ".security.json")
-		key := security.Key("recipes", dest)
-		store, err := security.Load(statePath)
-		if err != nil {
-			return stats, err
-		}
-		if err := store.Check(key, verified.Manifest.Generation, verified.SHA256); err != nil {
-			return stats, err
-		}
-		if !dryRun {
-			store.Update(key, security.Entry{
-				Kind:       "recipes",
-				Identity:   dest,
-				KeyID:      verified.Manifest.KeyID,
-				Generation: verified.Manifest.Generation,
-				SHA256:     verified.SHA256,
-			})
-			if err := store.Save(statePath); err != nil {
-				return stats, err
-			}
-		}
 	}
 	if dryRun {
 		return stats, nil
@@ -286,6 +303,51 @@ func syncRecipes(cfg config.Config, from, dest string, allowUnsigned, dryRun boo
 			_ = os.Rename(backup, dest)
 		}
 		return stats, fmt.Errorf("install new recipe tree: %w", err)
+	}
+	return stats, nil
+}
+
+// validateRecipeTree scans the staged tree and verifies its recipe manifest.
+func validateRecipeTree(cfg config.Config, staging, dest string, allowUnsigned, dryRun bool) (syncStats, error) {
+	stats, err := scanRecipeTree(staging)
+	if err != nil {
+		return stats, err
+	}
+	keys, err := sign.LoadKeyring(cfg.TrustedKeys)
+	if err != nil {
+		return stats, err
+	}
+	verified, err := recipesig.Verify(staging, keys, allowUnsigned || cfg.AllowUnsigned, cfg.AllowExpired)
+	if err != nil {
+		return stats, err
+	}
+	if verified == nil {
+		fmt.Fprintln(os.Stderr, "zpkg: warning: recipe tree is unsigned (allowed by --allow-unsigned / ZPKG_ALLOW_UNSIGNED)")
+		return stats, nil
+	}
+	if cfg.DB == "" {
+		return stats, nil
+	}
+	statePath := filepath.Join(cfg.DB, ".security.json")
+	key := security.Key("recipes", dest)
+	store, err := security.Load(statePath)
+	if err != nil {
+		return stats, err
+	}
+	if err := store.Check(key, verified.Manifest.Generation, verified.SHA256); err != nil {
+		return stats, err
+	}
+	if !dryRun {
+		store.Update(key, security.Entry{
+			Kind:       "recipes",
+			Identity:   dest,
+			KeyID:      verified.Manifest.KeyID,
+			Generation: verified.Manifest.Generation,
+			SHA256:     verified.SHA256,
+		})
+		if err := store.Save(statePath); err != nil {
+			return stats, err
+		}
 	}
 	return stats, nil
 }
