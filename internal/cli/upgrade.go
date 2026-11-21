@@ -152,25 +152,44 @@ func cmdUpgrade(args []string) error {
 	}
 
 	if hasActions {
-		names := make([]string, 0, len(plan.Entries))
-		for _, e := range plan.Entries {
-			names = append(names, e.Name)
-		}
-		installOpts := installOptions{
-			force:        true,
-			asdeps:       true,
-			noSandbox:    o.noSandbox,
-			clean:        o.clean,
-			reproCheck:   o.reproCheck,
-			deferInstall: true,
-			skipPlan:     true,
-			channel:      o.channel,
-		}
+		// New dependencies must be present in the build root before the
+		// packages that need them are built. Install only the additive
+		// KindInstall entries first; upgrades/rebuilds stay deferred so a
+		// later build failure does not replace any installed version.
+		newDeps, changes := splitUpgradeEntries(plan.Entries)
 		before := snapshotVersions(db, plan.Entries)
-		phase("Building %d package(s) before installing", len(names))
-		if err := cmdBuildInstall(names, true, installOpts); err != nil {
-			printUpgradeRecovery(plan, db, before)
-			return fmt.Errorf("upgrade failed: %w", err)
+		if len(newDeps) > 0 {
+			phase("Installing %d new dependency(s) before building", len(newDeps))
+			installOpts := installOptions{
+				force:      true,
+				asdeps:     true,
+				noSandbox:  o.noSandbox,
+				clean:      o.clean,
+				reproCheck: o.reproCheck,
+				skipPlan:   true,
+				channel:    o.channel,
+			}
+			if err := cmdBuildInstall(newDeps, true, installOpts); err != nil {
+				printUpgradeRecovery(plan, db, before)
+				return fmt.Errorf("upgrade failed: %w", err)
+			}
+		}
+		if len(changes) > 0 {
+			installOpts := installOptions{
+				force:        true,
+				asdeps:       true,
+				noSandbox:    o.noSandbox,
+				clean:        o.clean,
+				reproCheck:   o.reproCheck,
+				deferInstall: true,
+				skipPlan:     true,
+				channel:      o.channel,
+			}
+			phase("Building %d package(s) before installing", len(changes))
+			if err := cmdBuildInstall(changes, true, installOpts); err != nil {
+				printUpgradeRecovery(plan, db, before)
+				return fmt.Errorf("upgrade failed: %w", err)
+			}
 		}
 		for _, name := range o.targets {
 			if err := world.Add(cfg.DB, name); err != nil {
@@ -304,6 +323,23 @@ func planPrunableOrphans(plan *upgrade.Plan) []upgrade.Orphan {
 		}
 	}
 	return out
+}
+
+// splitUpgradeEntries separates packages that are not installed yet from
+// packages whose installed version/recipe is being replaced. New packages can
+// be installed before the build phase without changing an existing package;
+// upgrades must stay deferred until every build has succeeded.
+func splitUpgradeEntries(entries []upgrade.Entry) (newDeps, changes []string) {
+	newDeps = make([]string, 0, len(entries))
+	changes = make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Kind == upgrade.KindInstall {
+			newDeps = append(newDeps, e.Name)
+		} else {
+			changes = append(changes, e.Name)
+		}
+	}
+	return newDeps, changes
 }
 
 func snapshotVersions(db pkgdb.DB, entries []upgrade.Entry) map[string]string {

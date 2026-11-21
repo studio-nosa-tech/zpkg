@@ -56,7 +56,7 @@ Total: 2 packages (1 target, 1 dependency)
 | `depends [-r] <pkg>...` | 依存(と makedepends)を含むビルド順。`-r` はインストール済みの逆依存を表示 |
 | `build [-f] [--no-sandbox] [--clean] [--repro-check] <pkg>...` | fetch → 検証 → destroot まで(インストールしない)。build は既定で bubblewrap 内。`--clean` は work を削除、`--repro-check` は 2 回ビルドして manifest 比較 |
 | `install [-f] [-p] [--asdeps] [--no-sandbox] [--clean] [--repro-check] <pkg>...` | 必要ならビルドして `$ZPKG_ROOT` へ。`-p` は pretend、`--asdeps` は world に追加しない。`--clean` / `--repro-check` はキャッシュを使わずソースビルド |
-| `upgrade [-p] [-y] [--newuse] [--prune] [--allow-downgrade] [--channel <ch>] [--verify] [pkg]...` | world(または指定 pkg)を選択チャンネルの版へ。変更一覧・依存差分・警告を表示し、全ビルド成功後にインストール。`--newuse` は USE 変更時に再ビルド、`--prune` は孤立依存を削除、`--allow-downgrade` はダウングレードを許可、`--verify` は全ファイルの sha256 を検証 |
+| `upgrade [-p] [-y] [--newuse] [--prune] [--allow-downgrade] [--channel <ch>] [--verify] [pkg]...` | world(または指定 pkg)を選択チャンネルの版へ。変更一覧・依存差分・警告を表示し、新規依存を先にインストールしてから全ビルド成功後にアップグレードをインストール。`--newuse` は USE 変更時に再ビルド、`--prune` は孤立依存を削除、`--allow-downgrade` はダウングレードを許可、`--verify` は全ファイルの sha256 を検証 |
 | `remove [-f] <pkg>...` | 全スロットを削除し world から除去。逆依存がある場合は停止(`-f` で強制) |
 | `list` | インストール済み一覧(`name@slot` 表示) |
 | `info <pkg>...` | インストール済みメタデータとレシピの版 |
@@ -182,12 +182,15 @@ version+revision のまま内容だけ変えると binpkg キャッシュが衝�
 `--allow-downgrade` が無ければ専用の確認(`[y/N]`)を出す。`--yes` は
 通常の確認を省略する。非対話環境では `--yes` が必要。
 
-計画したパッケージは**すべてビルドしてから**インストールする。ビルドが
-1つでも失敗すればシステムは変更されない。インストール失敗時はその
-パッケージだけがロールバックされ、再実行で続きから再開できる。クラッシュ
-した場合は `zpkg recover` が処理する。完了後は依存関係を再解決し、
-変更したパッケージの manifest を検証する(`--verify` で全ファイルの
-sha256 も照合)。
+計画したパッケージのうち、**新しく必要になった依存**(新規インストール)は
+先にビルドしてインストールする。その後でアップグレード / 再ビルド /
+ダウングレード対象を**すべてビルドしてから**インストールする。新規依存は
+追加のみで既存パッケージを置き換えないため、後続のビルドが失敗しても
+既存システムは壊れない(先に追加した依存は残る)。インストール失敗時は
+そのパッケージだけがロールバックされ、再実行で続きから再開できる。
+クラッシュした場合は `zpkg recover` が処理する。完了後は依存関係を
+再解決し、変更したパッケージの manifest を検証する(`--verify` で
+全ファイルの sha256 も照合)。
 
 ## 署名と検証
 
@@ -553,9 +556,10 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
   SOURCE_DATE_EPOCH だけでは一致しないことがある
 - SBOM のライセンス / copyright はレシピに情報がないため `NOASSERTION`
 - ビルドログは cache 配下なので、cache を消すと失われる
-- upgrade はセット全体を1トランザクションでは扱わない。ビルド全成功後に
-  インストールし、失敗時はパッケージ単位でロールバックする。再実行で再開、
-  クラッシュは `zpkg recover` で復旧する
+- upgrade はセット全体を1トランザクションでは扱わない。新規依存を先に
+  インストールし、アップグレード対象はビルド全成功後にインストールする。
+  失敗時はパッケージ単位でロールバックする。再実行で再開、クラッシュは
+  `zpkg recover` で復旧する
 - チャンネル間で version+revision が同じパッケージは upgrade で再インストール
   されない(内容を変えたら revision を上げる。強制は `install -f`)
 - 孤立パッケージの検出は slot 0 のみ。複数スロットを持つパッケージは
