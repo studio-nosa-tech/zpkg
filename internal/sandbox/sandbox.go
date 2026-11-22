@@ -190,19 +190,20 @@ func UmaskScript(script string) (name string, args []string) {
 
 // EnvOptions describes the sanitized environment for a build.
 type EnvOptions struct {
-	Root      string // target root; "/" inside a sandbox
-	WorkDir   string
-	CacheDir  string
-	Destroot  string
-	SourceDir string
-	RecipeDir string
-	Name      string
-	Version   string
-	Use       string
-	CFlags    string
-	MakeOpts  string
-	Network   bool
-	Sandboxed bool
+	Root       string // target root; "/" inside a sandbox
+	WorkDir    string
+	CacheDir   string
+	Destroot   string
+	SourceDir  string
+	RecipeDir  string
+	Name       string
+	Version    string
+	Use        string
+	VideoCards string
+	CFlags     string
+	MakeOpts   string
+	Network    bool
+	Sandboxed  bool
 	// SourceDateEpoch is the fixed timestamp exposed to the build. Zero
 	// leaves SOURCE_DATE_EPOCH and the KBUILD_* variables unset.
 	SourceDateEpoch int64
@@ -235,6 +236,7 @@ func Env(o EnvOptions) []string {
 		"ZPKG_SRC=" + o.SourceDir,
 		"ZPKG_WORKDIR=" + o.WorkDir,
 		"ZPKG_USE=" + o.Use,
+		"ZPKG_VIDEO_CARDS=" + o.VideoCards,
 		"ZPKG_CFLAGS=" + o.CFlags,
 		"ZPKG_MAKEOPTS=" + o.MakeOpts,
 		"PYTHONHASHSEED=0",

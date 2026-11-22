@@ -10,7 +10,7 @@ import (
 )
 
 // Version is the zpkg release version shipped by this source tree.
-const Version = "0.3.3"
+const Version = "0.3.4"
 
 const usage = `zpkg - ZIGNOS package manager (v` + Version + `)
 
@@ -81,6 +81,8 @@ Usage:
   zpkg use [flag | -flag]...  show or edit /etc/zpkg/use.conf (USE flags)
   zpkg use --package <pkg> [flag | -flag]...
                               show or edit the package's line in package.use
+  zpkg video-cards [card | -card]...
+                              show or edit VIDEO_CARDS in /etc/zpkg/make.conf
   zpkg provenance <pkg>...    show the recorded build provenance (JSON)
   zpkg sbom <pkg>...          show a package's SPDX 2.3 SBOM
   zpkg sbom --system [-o <file>]
@@ -99,6 +101,8 @@ Environment:
                as stable)
   ZPKG_CHANNEL release channel: stable (default), testing or unstable.
                Overrides CHANNEL= in /etc/zpkg/make.conf for this run
+  ZPKG_VIDEO_CARDS  video cards passed to recipes as ZPKG_VIDEO_CARDS;
+               overrides VIDEO_CARDS= in /etc/zpkg/make.conf
   ZPKG_ROOT    target system root (default /)
   ZPKG_CACHE   cache dir (default $ZPKG_ROOT/var/cache/zpkg)
   ZPKG_DB      package db dir (default $ZPKG_ROOT/var/lib/zpkg)
@@ -239,6 +243,8 @@ func Run(args []string) error {
 		return withArgs(cmd, rest, cmdSearch)
 	case "use":
 		return cmdUse(rest)
+	case "video-cards":
+		return cmdVideoCards(rest)
 	case "provenance":
 		return withArgs(cmd, rest, cmdProvenance)
 	case "sbom":

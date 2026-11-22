@@ -362,7 +362,7 @@ func LoadRepoBinpkg(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 	if cfg.BinRepo == "" {
 		return nil, nil
 	}
-	return loadRepoBinpkgImpl(r, cfg.BinRepo, cfg.Cache, cfg.Options.ForPackage(r.Name).Hash(), cfg)
+	return loadRepoBinpkgImpl(r, cfg.BinRepo, cfg.Cache, OptionsHash(cfg, r), cfg)
 }
 
 // fetchRepoFileVerified returns the local path of a repository file,

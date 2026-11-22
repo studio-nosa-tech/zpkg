@@ -34,11 +34,14 @@ type Meta struct {
 	Arch      string   `json:"arch,omitempty"`
 	Installed string   `json:"installed,omitempty"` // RFC3339, UTC
 	UseFlags  []string `json:"useflags,omitempty"`
-	Depends   []string `json:"depends,omitempty"`      // runtime dependencies
-	BuildDeps []string `json:"builddepends,omitempty"` // build-only dependencies
-	Provides  []string `json:"provides,omitempty"`     // virtual packages this record satisfies
-	Conflicts []string `json:"conflicts,omitempty"`    // packages this record must not coexist with
-	BuildID   string   `json:"buildid,omitempty"`
+	// VideoCards is non-nil only for packages whose recipe declares a
+	// video_cards file; it records the VIDEO_CARDS selection used to build.
+	VideoCards []string `json:"videocards"`
+	Depends    []string `json:"depends,omitempty"`      // runtime dependencies
+	BuildDeps  []string `json:"builddepends,omitempty"` // build-only dependencies
+	Provides   []string `json:"provides,omitempty"`     // virtual packages this record satisfies
+	Conflicts  []string `json:"conflicts,omitempty"`    // packages this record must not coexist with
+	BuildID    string   `json:"buildid,omitempty"`
 
 	// Provenance of this installation. Origin is "source", "binpkg" (local
 	// build cache) or "binrepo". For binrepo, the key and generation describe

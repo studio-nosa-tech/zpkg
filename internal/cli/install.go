@@ -13,6 +13,7 @@ import (
 	"github.com/studio-nosa-tech/zpkg/internal/build"
 	"github.com/studio-nosa-tech/zpkg/internal/config"
 	"github.com/studio-nosa-tech/zpkg/internal/install"
+	"github.com/studio-nosa-tech/zpkg/internal/options"
 	"github.com/studio-nosa-tech/zpkg/internal/pkgdb"
 	"github.com/studio-nosa-tech/zpkg/internal/provenance"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
@@ -22,7 +23,14 @@ import (
 
 // metaFromRecipe captures the provenance of an install so later upgrades
 // and queries do not need to re-read the recipe tree.
-func metaFromRecipe(r *recipe.Recipe, use []string, channel string) *pkgdb.Meta {
+func videoCardsFor(r *recipe.Recipe, opts options.Options) []string {
+	if !r.UsesVideoCards() {
+		return nil
+	}
+	return append([]string{}, opts.VideoCards...)
+}
+
+func metaFromRecipe(r *recipe.Recipe, use, videoCards []string, channel string) *pkgdb.Meta {
 	digest := ""
 	if r.Dir != "" {
 		digest, _ = provenance.RecipeDigest(r.Dir)
@@ -38,6 +46,7 @@ func metaFromRecipe(r *recipe.Recipe, use []string, channel string) *pkgdb.Meta 
 		Arch:         runtime.GOARCH,
 		Installed:    time.Now().UTC().Format(time.RFC3339),
 		UseFlags:     append([]string{}, use...),
+		VideoCards:   videoCards,
 		Depends:      append([]string{}, r.Depends...),
 		BuildDeps:    append([]string{}, r.MakeDepends...),
 		Provides:     append([]string{}, r.Provides...),
@@ -205,7 +214,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 				fmt.Fprintln(os.Stderr, "zpkg: warning: clean old workdir:", err)
 			}
 			if cfg.BuildBinpkg || o.reproCheck {
-				if _, err := build.PackBinpkg(r, res, cfg.Cache, opts.Hash(), cfg.Channel); err != nil {
+				if _, err := build.PackBinpkg(r, res, cfg.Cache, opts.HashFor(r.UsesVideoCards()), cfg.Channel); err != nil {
 					fmt.Fprintln(os.Stderr, "zpkg: binpkg pack failed:", err)
 				} else {
 					phase("Packed binpkg %s", res.ArtifactPath)
@@ -227,7 +236,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 				if _, envHash, envCount := provenance.InstalledEnvironment(db); envCount > 0 {
 					second.BuildEnvHash, second.BuildEnvCount = envHash, envCount
 				}
-				if _, err := build.PackBinpkg(r, second, cfg.Cache, opts.Hash(), cfg.Channel); err != nil {
+				if _, err := build.PackBinpkg(r, second, cfg.Cache, opts.HashFor(r.UsesVideoCards()), cfg.Channel); err != nil {
 					return err
 				}
 				diffs := diffEntries(res.Entries, second.Entries)
@@ -254,7 +263,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 				}
 			}
 		}
-		meta := metaFromRecipe(r, opts.Use, cfg.Channel)
+		meta := metaFromRecipe(r, opts.Use, videoCardsFor(r, opts), cfg.Channel)
 		meta.Origin = res.OriginKind
 		meta.OriginRepo = res.OriginRepo
 		meta.OriginKeyID = res.OriginKeyID
@@ -447,6 +456,7 @@ func runHook(cfg config.Config, r *recipe.Recipe, hook string) error {
 		"ZPKG_VERSION=" + r.FullVersion(),
 		"ZPKG_ROOT=" + cfg.Root,
 		"ZPKG_USE=" + strings.Join(cfg.Options.ForPackage(r.Name).Use, " "),
+		"ZPKG_VIDEO_CARDS=" + strings.Join(cfg.Options.ForPackage(r.Name).VideoCards, " "),
 	}
 
 	var cmd *exec.Cmd

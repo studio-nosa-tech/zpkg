@@ -197,3 +197,31 @@ func TestResolveInstalledConflict(t *testing.T) {
 		t.Fatal("conflict with installed package resolved")
 	}
 }
+
+func TestResolveVideoCardsCondition(t *testing.T) {
+	repo := t.TempDir()
+	recipeDir(t, repo, "lib")
+	app := recipeDir(t, repo, "app")
+	writeFile(t, app, "depends", "video_cards_iris?lib\n")
+	idx, err := NewIndex([]string{repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	t.Setenv("ZPKG_VIDEO_CARDS", "")
+	got, err := (&Resolver{Index: idx, Options: testOptions(t, root)}).Resolve([]string{"app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"app"}; !reflect.DeepEqual(got.Order, want) {
+		t.Fatalf("order without iris = %v", got.Order)
+	}
+	t.Setenv("ZPKG_VIDEO_CARDS", "iris")
+	got, err = (&Resolver{Index: idx, Options: testOptions(t, root)}).Resolve([]string{"app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"lib", "app"}; !reflect.DeepEqual(got.Order, want) {
+		t.Fatalf("order with iris = %v", got.Order)
+	}
+}

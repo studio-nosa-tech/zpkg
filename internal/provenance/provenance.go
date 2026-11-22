@@ -72,6 +72,7 @@ type Source struct {
 // Build describes the build configuration and origin.
 type Build struct {
 	Use               []string `json:"use,omitempty"`
+	VideoCards        []string `json:"video_cards,omitempty"`
 	CFlags            string   `json:"cflags,omitempty"`
 	MakeOpts          string   `json:"makeopts,omitempty"`
 	Sandbox           string   `json:"sandbox,omitempty"`
@@ -265,6 +266,7 @@ func FromMeta(rec *pkgdb.Rec) *Info {
 	info.Recipe.Channel = m.Channel
 	info.Build = Build{
 		Use:              append([]string{}, m.UseFlags...),
+		VideoCards:       append([]string{}, m.VideoCards...),
 		Sandbox:          m.BuildSandbox,
 		Network:          m.BuildNetwork,
 		Origin:           m.Origin,

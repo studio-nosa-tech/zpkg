@@ -112,3 +112,34 @@ func TestUpgradeWarning(t *testing.T) {
 		t.Fatalf("warning = %q", r.UpgradeWarning)
 	}
 }
+
+func TestUsesVideoCards(t *testing.T) {
+	repo := t.TempDir()
+	dir := filepath.Join(repo, "gpu")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "version"), []byte("1.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "build"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Load([]string{repo}, "gpu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.UsesVideoCards() {
+		t.Error("UsesVideoCards should be false without a video_cards file")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "video_cards"), []byte("iris\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err = Load([]string{repo}, "gpu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.UsesVideoCards() {
+		t.Error("UsesVideoCards should be true with a video_cards file")
+	}
+}

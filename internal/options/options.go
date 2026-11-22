@@ -1,15 +1,15 @@
-// Package options loads build options: USE flags and the CFLAGS/MAKEOPTS
-// used for recipe builds.
+// Package options loads build options: USE flags and the CFLAGS/MAKEOPTS/
+// VIDEO_CARDS used for recipe builds.
 //
 // Configuration lives in the target root:
 //
 //	/etc/zpkg/use.conf      whitespace-separated global USE flags
 //	/etc/zpkg/package.use   one line per package: "<pkg> flag -flag ..."
-//	/etc/zpkg/make.conf     CFLAGS=... / MAKEOPTS=... lines
+//	/etc/zpkg/make.conf     CFLAGS=... / MAKEOPTS=... / VIDEO_CARDS=... lines
 //
-// The ZPKG_USE, ZPKG_CFLAGS and ZPKG_MAKEOPTS environment variables
-// override the files (handy for one-off builds and tests); an explicitly
-// empty value clears the file setting.
+// The ZPKG_USE, ZPKG_CFLAGS, ZPKG_MAKEOPTS and ZPKG_VIDEO_CARDS environment
+// variables override the files (handy for one-off builds and tests); an
+// explicitly empty value clears the file setting.
 package options
 
 import (
@@ -19,16 +19,19 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // Options is the effective build configuration. The per-package tokens are
 // kept raw so ForPackage can apply them on top of the global set.
 type Options struct {
-	Use      []string // enabled flags, sorted
-	set      map[string]bool
-	CFlags   string
-	MakeOpts string
-	pkgUse   map[string][]string // package -> raw "+flag"/"-flag" tokens
+	Use        []string // enabled USE flags, sorted
+	set        map[string]bool
+	VideoCards []string // enabled video cards, sorted (iris, virgl, ...)
+	videoSet   map[string]bool
+	CFlags     string
+	MakeOpts   string
+	pkgUse     map[string][]string // package -> raw "+flag"/"-flag" tokens
 }
 
 func usePath(root string) string  { return filepath.Join(root, "etc", "zpkg", "use.conf") }
@@ -39,7 +42,7 @@ func pkgUsePath(root string) string {
 
 // Load reads the configuration for root. Missing files mean "no options".
 func Load(root string) (Options, error) {
-	o := Options{set: map[string]bool{}, pkgUse: map[string][]string{}}
+	o := Options{set: map[string]bool{}, videoSet: map[string]bool{}, pkgUse: map[string][]string{}}
 
 	flags, err := readTokens(usePath(root))
 	if err != nil {
@@ -75,6 +78,17 @@ func Load(root string) (Options, error) {
 	if env, ok := os.LookupEnv("ZPKG_MAKEOPTS"); ok {
 		o.MakeOpts = env
 	}
+	if v, err := readVar(makePath(root), "VIDEO_CARDS"); err != nil {
+		return o, err
+	} else if v != "" {
+		o.VideoCards = parseVideoCards(v)
+	}
+	if env, ok := os.LookupEnv("ZPKG_VIDEO_CARDS"); ok {
+		o.VideoCards = parseVideoCards(env)
+	}
+	for _, c := range o.VideoCards {
+		o.videoSet[c] = true
+	}
 	return o, nil
 }
 
@@ -86,13 +100,18 @@ func (o Options) ForPackage(name string) Options {
 		return o
 	}
 	p := Options{
-		set:      make(map[string]bool, len(o.set)+len(tokens)),
-		CFlags:   o.CFlags,
-		MakeOpts: o.MakeOpts,
-		pkgUse:   o.pkgUse,
+		set:        make(map[string]bool, len(o.set)+len(tokens)),
+		videoSet:   make(map[string]bool, len(o.videoSet)),
+		VideoCards: append([]string{}, o.VideoCards...),
+		CFlags:     o.CFlags,
+		MakeOpts:   o.MakeOpts,
+		pkgUse:     o.pkgUse,
 	}
 	for f := range o.set {
 		p.set[f] = true
+	}
+	for c := range o.videoSet {
+		p.videoSet[c] = true
 	}
 	for _, t := range tokens {
 		p.addFlag(t)
@@ -104,8 +123,12 @@ func (o Options) ForPackage(name string) Options {
 // Enabled reports whether a USE flag is on.
 func (o Options) Enabled(flag string) bool { return o.set[flag] }
 
+// VideoCardEnabled reports whether a VIDEO_CARDS entry is enabled.
+func (o Options) VideoCardEnabled(card string) bool { return o.videoSet[card] }
+
 // Expand resolves conditional dependencies: "flag?pkg" yields pkg when the
-// flag is enabled and disappears otherwise. Plain names pass through.
+// USE flag is enabled and disappears otherwise. "video_cards_iris?pkg" uses
+// the VIDEO_CARDS list instead. Plain names pass through.
 func (o Options) Expand(deps []string) []string {
 	out := make([]string, 0, len(deps))
 	for _, d := range deps {
@@ -115,7 +138,11 @@ func (o Options) Expand(deps []string) []string {
 			continue
 		}
 		flag, pkg := d[:i], d[i+1:]
-		if pkg != "" && o.set[flag] {
+		enabled := o.set[flag]
+		if card, ok := strings.CutPrefix(flag, "video_cards_"); ok {
+			enabled = o.videoSet[card]
+		}
+		if pkg != "" && enabled {
 			out = append(out, pkg)
 		}
 	}
@@ -125,11 +152,20 @@ func (o Options) Expand(deps []string) []string {
 // Hash is a short digest of the effective options, used in binpkg cache
 // names so builds with different flags do not collide. Empty when no
 // options are set.
-func (o Options) Hash() string {
-	if len(o.Use) == 0 && o.CFlags == "" && o.MakeOpts == "" {
+func (o Options) Hash() string { return o.HashFor(false) }
+
+// HashFor is Hash with an optional VIDEO_CARDS component for recipes that
+// consume ZPKG_VIDEO_CARDS. Other packages keep the same cache name when the
+// video card selection changes.
+func (o Options) HashFor(videoCards bool) string {
+	if len(o.Use) == 0 && o.CFlags == "" && o.MakeOpts == "" && (!videoCards || len(o.VideoCards) == 0) {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(strings.Join(o.Use, ",") + "|" + o.CFlags + "|" + o.MakeOpts))
+	extra := ""
+	if videoCards {
+		extra = strings.Join(o.VideoCards, ",")
+	}
+	sum := sha256.Sum256([]byte(strings.Join(o.Use, ",") + "|" + o.CFlags + "|" + o.MakeOpts + "|" + extra))
 	return hex.EncodeToString(sum[:])[:8]
 }
 
@@ -147,6 +183,34 @@ func Save(root string, flags []string) error {
 		b.WriteByte('\n')
 	}
 	return writeAtomic(usePath(root), []byte(b.String()))
+}
+
+// SaveVideoCards writes VIDEO_CARDS to root's make.conf.
+func SaveVideoCards(root string, cards []string) error {
+	cards = normalizeVideoCards(cards)
+	return SetVar(makePath(root), "VIDEO_CARDS", strings.Join(cards, " "))
+}
+
+// parseVideoCards splits a VIDEO_CARDS value on whitespace and commas.
+func parseVideoCards(s string) []string {
+	return normalizeVideoCards(strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	}))
+}
+
+func normalizeVideoCards(cards []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(cards))
+	for _, c := range cards {
+		c = strings.ToLower(strings.TrimSpace(c))
+		if c == "" || seen[c] {
+			continue
+		}
+		seen[c] = true
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // PackageTokens returns the raw per-package tokens for name.

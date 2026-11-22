@@ -26,7 +26,8 @@ import (
 
 // PackageBase is the cache key for a recipe: name-version, plus -rN when the
 // recipe has a revision, plus a short options hash when USE/CFLAGS/MAKEOPTS
-// are set. Baking both in keeps builds with different inputs apart.
+// (and, for video recipes, VIDEO_CARDS) are set. Baking both in keeps builds
+// with different inputs apart.
 func PackageBase(r *recipe.Recipe, optsHash string) string {
 	base := r.Name + "-" + r.Version
 	if r.Revision > 0 {
@@ -36,6 +37,13 @@ func PackageBase(r *recipe.Recipe, optsHash string) string {
 		base += "-" + optsHash
 	}
 	return base
+}
+
+// OptionsHash returns the effective build options hash for r. VIDEO_CARDS is
+// included only for recipes that declare a video_cards file, so changing the
+// GPU selection does not invalidate every other cached package.
+func OptionsHash(cfg config.Config, r *recipe.Recipe) string {
+	return cfg.Options.ForPackage(r.Name).HashFor(r.UsesVideoCards())
 }
 
 // Result describes one completed build.
@@ -78,7 +86,7 @@ const workPackageMarker = ".zpkg-package"
 // CleanWork removes the build work directory (sources, destroot, HOME and
 // compiler caches) for one package.
 func CleanWork(r *recipe.Recipe, cfg config.Config) error {
-	return os.RemoveAll(filepath.Join(cfg.Cache, "build", PackageBase(r, cfg.Options.ForPackage(r.Name).Hash())))
+	return os.RemoveAll(filepath.Join(cfg.Cache, "build", PackageBase(r, OptionsHash(cfg, r))))
 }
 
 // CleanOldWork removes work directories for older builds of the same package.
@@ -94,7 +102,7 @@ func CleanOldWork(r *recipe.Recipe, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	current := PackageBase(r, cfg.Options.ForPackage(r.Name).Hash())
+	current := PackageBase(r, OptionsHash(cfg, r))
 	for _, e := range entries {
 		if !e.IsDir() || e.Name() == current {
 			continue
@@ -122,7 +130,7 @@ func CleanOldBinpkgs(r *recipe.Recipe, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	current := PackageBase(r, cfg.Options.ForPackage(r.Name).Hash())
+	current := PackageBase(r, OptionsHash(cfg, r))
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".meta.json") {
 			continue
@@ -150,7 +158,7 @@ func CleanOldBinpkgs(r *recipe.Recipe, cfg config.Config) error {
 // It is used when --repro-check forced a pack but BUILD_BINPKG is disabled.
 func RemoveCurrentBinpkg(r *recipe.Recipe, cfg config.Config) error {
 	return removeBinpkgFiles(filepath.Join(cfg.Cache, "binpkgs"),
-		PackageBase(r, cfg.Options.ForPackage(r.Name).Hash()))
+		PackageBase(r, OptionsHash(cfg, r)))
 }
 
 func removeBinpkgFiles(root, base string) error {
@@ -332,7 +340,7 @@ func LoadBinpkg(r *recipe.Recipe, cfg config.Config) *Result {
 		return nil
 	}
 	dir := filepath.Join(cfg.Cache, "binpkgs")
-	base := PackageBase(r, cfg.Options.ForPackage(r.Name).Hash())
+	base := PackageBase(r, OptionsHash(cfg, r))
 	data, err := os.ReadFile(filepath.Join(dir, base+".meta.json"))
 	if err != nil {
 		return nil
@@ -417,7 +425,7 @@ func recipeDigestFor(r *recipe.Recipe) string {
 // recorded when enabled.
 func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 	opts := cfg.Options.ForPackage(r.Name)
-	optsHash := opts.Hash()
+	optsHash := opts.HashFor(r.UsesVideoCards())
 	base := PackageBase(r, optsHash)
 	work := filepath.Join(cfg.Cache, "build", base)
 	destroot := filepath.Join(work, "destroot")
@@ -499,6 +507,7 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 		Name:            r.Name,
 		Version:         r.Version,
 		Use:             strings.Join(opts.Use, " "),
+		VideoCards:      strings.Join(opts.VideoCards, " "),
 		CFlags:          opts.CFlags,
 		MakeOpts:        opts.MakeOpts,
 		Network:         network,

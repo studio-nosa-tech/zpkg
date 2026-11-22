@@ -78,7 +78,7 @@ func depComponents(db pkgdb.DB, atoms, use []string) []provenance.Component {
 // environment information for every origin kind.
 func provenanceForBuild(db pkgdb.DB, cfg config.Config, r *recipe.Recipe, res *build.Result, meta *pkgdb.Meta) *provenance.Info {
 	opts := cfg.Options.ForPackage(r.Name)
-	base := build.PackageBase(r, opts.Hash())
+	base := build.PackageBase(r, opts.HashFor(r.UsesVideoCards()))
 	info := &provenance.Info{
 		Schema: provenance.Schema,
 		Package: provenance.Package{
@@ -92,6 +92,7 @@ func provenanceForBuild(db pkgdb.DB, cfg config.Config, r *recipe.Recipe, res *b
 		Sources: res.Sources,
 		Build: provenance.Build{
 			Use:              append([]string{}, meta.UseFlags...),
+			VideoCards:       append([]string{}, meta.VideoCards...),
 			CFlags:           opts.CFlags,
 			MakeOpts:         opts.MakeOpts,
 			Sandbox:          meta.BuildSandbox,

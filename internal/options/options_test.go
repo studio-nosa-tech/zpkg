@@ -189,3 +189,75 @@ func TestSetVarPreservesOtherLines(t *testing.T) {
 		t.Error("old CFLAGS value survived")
 	}
 }
+
+func TestVideoCardsLoadAndExpand(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "etc/zpkg/make.conf"), "VIDEO_CARDS=\"iris, virgl iris\"\n")
+	old, had := os.LookupEnv("ZPKG_VIDEO_CARDS")
+	os.Unsetenv("ZPKG_VIDEO_CARDS")
+	defer func() {
+		if had {
+			os.Setenv("ZPKG_VIDEO_CARDS", old)
+		}
+	}()
+
+	o, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"iris", "virgl"}; !reflect.DeepEqual(o.VideoCards, want) {
+		t.Fatalf("VideoCards = %v, want %v", o.VideoCards, want)
+	}
+	if !o.VideoCardEnabled("iris") || o.VideoCardEnabled("amdgpu") {
+		t.Error("VideoCardEnabled is wrong")
+	}
+	deps := []string{"libdrm", "video_cards_iris?libX11", "video_cards_amdgpu?llvm", "video_cards_iris?"}
+	if got, want := o.Expand(deps), []string{"libdrm", "libX11"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Expand = %v, want %v", got, want)
+	}
+}
+
+func TestVideoCardsEnvOverride(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "etc/zpkg/make.conf"), "VIDEO_CARDS=iris\n")
+	t.Setenv("ZPKG_VIDEO_CARDS", "radeonsi, virgl")
+	o, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"radeonsi", "virgl"}; !reflect.DeepEqual(o.VideoCards, want) {
+		t.Fatalf("VideoCards = %v, want %v", o.VideoCards, want)
+	}
+}
+
+func TestHashForVideoCards(t *testing.T) {
+	a := Options{VideoCards: []string{"iris"}}
+	b := Options{VideoCards: []string{"virgl"}}
+	if a.Hash() != "" {
+		t.Errorf("Hash without video component = %q, want empty", a.Hash())
+	}
+	if a.HashFor(false) != b.HashFor(false) {
+		t.Error("HashFor(false) must not depend on VIDEO_CARDS")
+	}
+	if a.HashFor(true) == "" || a.HashFor(true) == b.HashFor(true) {
+		t.Error("HashFor(true) must include VIDEO_CARDS")
+	}
+}
+
+func TestSaveVideoCards(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "etc/zpkg/make.conf"), "CFLAGS=\"-O2\"\n")
+	if err := SaveVideoCards(root, []string{"virgl", "iris", "iris"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "etc/zpkg/make.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "VIDEO_CARDS=iris virgl") {
+		t.Fatalf("make.conf = %q", data)
+	}
+	if !strings.Contains(string(data), "CFLAGS=\"-O2\"") {
+		t.Fatalf("CFLAGS was lost: %q", data)
+	}
+}

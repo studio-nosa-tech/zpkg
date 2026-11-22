@@ -46,6 +46,17 @@ func (r *Recipe) FullVersion() string {
 	return version.String(r.Version, r.Revision)
 }
 
+// UsesVideoCards reports whether the recipe consumes ZPKG_VIDEO_CARDS.
+// Such recipes carry a "video_cards" file; their binpkg key includes the
+// selection so changing it does not reuse a package built for another GPU.
+func (r *Recipe) UsesVideoCards() bool {
+	if r.Dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(r.Dir, "video_cards"))
+	return err == nil
+}
+
 // Load finds the recipe for name across repos (first match wins).
 func Load(repos []string, name string) (*Recipe, error) {
 	for _, repo := range repos {

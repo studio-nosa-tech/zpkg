@@ -115,7 +115,7 @@ func parseAtoms(r *recipe.Recipe, lines []string, field string) ([]depspec.Atom,
 		if err != nil {
 			return nil, fmt.Errorf("%s: %s: %w", r.Name, field, err)
 		}
-		if a.Condition != "" && !hasFlag(r.IUse, a.Condition) {
+		if a.Condition != "" && !hasFlag(r.IUse, a.Condition) && !strings.HasPrefix(a.Condition, "video_cards_") {
 			return nil, fmt.Errorf("%s: %s uses condition %q, which is not in iuse", r.Name, field, a.Condition)
 		}
 		atoms = append(atoms, a)
@@ -326,8 +326,18 @@ func (r *Resolver) active(req requirement) bool {
 	if req.atom.Condition == "" {
 		return true
 	}
-	enabled := r.Options.ForPackage(req.requirer).Enabled(req.atom.Condition)
+	enabled := r.conditionEnabled(req.requirer, req.atom.Condition)
 	return enabled != req.atom.Negated
+}
+
+// conditionEnabled evaluates a recipe dependency condition. In addition to
+// USE flags it understands video_cards_<card> atoms backed by VIDEO_CARDS.
+func (r *Resolver) conditionEnabled(pkg, condition string) bool {
+	o := r.Options.ForPackage(pkg)
+	if card, ok := strings.CutPrefix(condition, "video_cards_"); ok {
+		return o.VideoCardEnabled(card)
+	}
+	return o.Enabled(condition)
 }
 
 func (r *Resolver) selectedMatch(st *solution, a depspec.Atom) (string, bool) {
@@ -464,7 +474,7 @@ func (r *Resolver) conflictingAtom(owner, other *Candidate) (depspec.Atom, bool)
 	}
 	for _, a := range owner.Conflicts {
 		if a.Condition != "" {
-			enabled := r.Options.ForPackage(owner.Name).Enabled(a.Condition)
+			enabled := r.conditionEnabled(owner.Name, a.Condition)
 			if enabled == a.Negated {
 				continue
 			}

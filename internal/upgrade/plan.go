@@ -291,6 +291,19 @@ func useFlagsChanged(rec *pkgdb.Rec, cfg config.Config) bool {
 			return true
 		}
 	}
+	// VideoCards is non-nil only for recipes that consume it. An empty
+	// selection is a valid configured state, so compare lengths too.
+	if rec.Meta.VideoCards != nil {
+		wantCards := cfg.Options.VideoCards
+		if len(wantCards) != len(rec.Meta.VideoCards) {
+			return true
+		}
+		for i := range wantCards {
+			if wantCards[i] != rec.Meta.VideoCards[i] {
+				return true
+			}
+		}
+	}
 	return false
 }
 
