@@ -98,13 +98,17 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		return err
 	}
 	db := pkgdb.DB{Dir: cfg.DB}
-	installed := map[string]bool{} // keyed by name@slot
+	installed := map[string]string{} // name@slot -> installed version
 	refs, err := db.List()
 	if err != nil {
 		return err
 	}
 	for _, ref := range refs {
-		installed[pkgdb.SlotKey(ref.Name, ref.Slot)] = true
+		rec, err := db.Get(ref.Name, ref.Slot)
+		if err != nil {
+			return err
+		}
+		installed[pkgdb.SlotKey(ref.Name, ref.Slot)] = rec.VersionString()
 	}
 
 	plan, err := resolvePlan(cfg, targets)
@@ -135,7 +139,13 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 		// the package is installed, because a cached binpkg would hide the
 		// source build they are meant to exercise.
 		explicitBuild := (o.clean || o.reproCheck) && targetSet[name]
-		skip := installed[pkgdb.SlotKey(name, r.Slot)] && !(o.force && targetSet[name]) && !explicitBuild
+		have, installedHere := installed[pkgdb.SlotKey(name, r.Slot)]
+		// "install pkg" follows the same UX as other package managers:
+		// naming an installed package with a different version/revision
+		// upgrades (or downgrades) it. Dependencies are still skipped so an
+		// unrelated install does not rebuild the world.
+		versionChanged := targetSet[name] && installedHere && have != r.FullVersion()
+		skip := installedHere && !(o.force && targetSet[name]) && !explicitBuild && !versionChanged
 		if skip {
 			phase("Skipping %s (already installed)", pkgLabel(r))
 			continue
