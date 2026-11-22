@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/studio-nosa-tech/zpkg/internal/hash"
 )
@@ -149,12 +150,13 @@ func Verify(files, sums []string) error {
 }
 
 // Extract unpacks an archive into dest with tar, which also covers the
-// compressed formats (gz, bz2, xz, ...).
+// compressed formats (gz, bz2, xz, ...). zstd archives are decompressed
+// separately with a large window: LLVM's official tarball uses a 1 GiB
+// window, which zstd's default 128 MiB decoder limit rejects.
 func Extract(archive, dest string) error {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
-	args := []string{}
 	if runtime.GOOS == "windows" {
 		// GNU tar reads "D:/..." as a remote archive ("Cannot connect to D:");
 		// --force-local keeps it local on a Windows dev host. It must precede
@@ -162,12 +164,57 @@ func Extract(archive, dest string) error {
 		// converted to forward slashes because a native process spawning the
 		// MSYS tar mangles backslash paths. Linux, the real target, never
 		// needs any of this.
-		args = append(args, "--force-local")
 		archive = filepath.ToSlash(archive)
 		dest = filepath.ToSlash(dest)
+	}
+	if isZstd(archive) {
+		return extractZstd(archive, dest)
+	}
+
+	args := []string{}
+	if runtime.GOOS == "windows" {
+		args = append(args, "--force-local")
 	}
 	args = append(args, "-xf", archive, "-C", dest)
 	cmd := exec.Command("tar", args...)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func isZstd(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".tar.zst") || strings.HasSuffix(lower, ".tzst")
+}
+
+func extractZstd(archive, dest string) error {
+	zstd := exec.Command("zstd", "-dc", "--long=30", "--memory=1024MB", archive)
+	zstd.Stderr = os.Stderr
+	out, err := zstd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+
+	args := []string{}
+	if runtime.GOOS == "windows" {
+		args = append(args, "--force-local")
+	}
+	args = append(args, "-xf", "-", "-C", dest)
+	tarCmd := exec.Command("tar", args...)
+	tarCmd.Stdin = out
+	tarCmd.Stderr = os.Stderr
+
+	if err := zstd.Start(); err != nil {
+		return fmt.Errorf("zstd: %w (install zstd to extract %s)", err, filepath.Base(archive))
+	}
+	if err := tarCmd.Start(); err != nil {
+		_ = zstd.Process.Kill()
+		_ = zstd.Wait()
+		return err
+	}
+	tarErr := tarCmd.Wait()
+	zstdErr := zstd.Wait()
+	if tarErr != nil {
+		return tarErr
+	}
+	return zstdErr
 }
