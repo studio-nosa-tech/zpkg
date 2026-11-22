@@ -73,10 +73,118 @@ type Result struct {
 	ManifestSHA256  string
 }
 
+const workPackageMarker = ".zpkg-package"
+
 // CleanWork removes the build work directory (sources, destroot, HOME and
 // compiler caches) for one package.
 func CleanWork(r *recipe.Recipe, cfg config.Config) error {
 	return os.RemoveAll(filepath.Join(cfg.Cache, "build", PackageBase(r, cfg.Options.ForPackage(r.Name).Hash())))
+}
+
+// CleanOldWork removes work directories for older builds of the same package.
+// The current build is kept: its destroot is still needed for installation.
+// Directories are identified by a marker file, so names containing hyphens
+// cannot collide with another package.
+func CleanOldWork(r *recipe.Recipe, cfg config.Config) error {
+	root := filepath.Join(cfg.Cache, "build")
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	current := PackageBase(r, cfg.Options.ForPackage(r.Name).Hash())
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == current {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		data, err := os.ReadFile(filepath.Join(dir, workPackageMarker))
+		if err != nil || strings.TrimSpace(string(data)) != r.Name {
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// CleanOldBinpkgs removes binary packages for older builds of the same
+// package. The sidecar .meta.json is authoritative for the package name.
+func CleanOldBinpkgs(r *recipe.Recipe, cfg config.Config) error {
+	root := filepath.Join(cfg.Cache, "binpkgs")
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	current := PackageBase(r, cfg.Options.ForPackage(r.Name).Hash())
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".meta.json") {
+			continue
+		}
+		base := strings.TrimSuffix(e.Name(), ".meta.json")
+		if base == current {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(root, e.Name()))
+		if err != nil {
+			continue
+		}
+		var m BinMeta
+		if json.Unmarshal(data, &m) != nil || m.Name != r.Name {
+			continue
+		}
+		if err := removeBinpkgFiles(root, base); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RemoveCurrentBinpkg removes the binary package for the current recipe.
+// It is used when --repro-check forced a pack but BUILD_BINPKG is disabled.
+func RemoveCurrentBinpkg(r *recipe.Recipe, cfg config.Config) error {
+	return removeBinpkgFiles(filepath.Join(cfg.Cache, "binpkgs"),
+		PackageBase(r, cfg.Options.ForPackage(r.Name).Hash()))
+}
+
+func removeBinpkgFiles(root, base string) error {
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), base+".") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(root, e.Name())); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// RemoveSourceArchives deletes the source tarballs used by one build.
+// Non-archive sources (patches, PEM bundles) are kept.
+func RemoveSourceArchives(res *Result, cacheDir string) error {
+	for _, s := range res.Sources {
+		if !isArchive(s.File) {
+			continue
+		}
+		p := filepath.Join(cacheDir, filepath.Base(s.File))
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func copyFile(src, dst string, perm os.FileMode) error {
@@ -376,6 +484,9 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 		return nil, err
 	}
 	if err := sandbox.PrepareWork(work); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(work, workPackageMarker), []byte(r.Name+"\n"), 0o644); err != nil {
 		return nil, err
 	}
 	env := sandbox.Env(sandbox.EnvOptions{

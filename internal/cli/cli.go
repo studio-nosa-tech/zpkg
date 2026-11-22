@@ -10,7 +10,7 @@ import (
 )
 
 // Version is the zpkg release version shipped by this source tree.
-const Version = "0.3.2"
+const Version = "0.3.3"
 
 const usage = `zpkg - ZIGNOS package manager (v` + Version + `)
 
@@ -140,6 +140,12 @@ Environment:
                   $ZPKG_CACHE/logs (BUILD_LOG= in /etc/zpkg/build.conf)
   ZPKG_SBOM      default 1. Set to 0 to skip SPDX SBOM generation
                   (SBOM= in /etc/zpkg/build.conf)
+  ZPKG_KEEP_WORKDIR default 0. Set to 1 to keep build work directories after
+                  a successful install (KEEP_WORKDIR= in build.conf)
+  ZPKG_BUILD_BINPKG default 0. Set to 1 to create local binpkgs after a
+                  source build (BUILD_BINPKG= in build.conf)
+  ZPKG_KEEP_SOURCES default 0. Set to 1 to keep downloaded source archives
+                  (KEEP_SOURCES= in build.conf)
 
 World: packages you name on "install" are recorded in $ZPKG_DB/world and are
 what "upgrade" acts on. Dependencies are installed but not added to world.
@@ -149,8 +155,10 @@ ZPKG_RECIPE_DIR, ZPKG_ROOT, ZPKG_CACHE, ZPKG_DESTROOT, ZPKG_SRC and
 ZPKG_WORKDIR. ZPKG_RECIPE_DIR lets recipes carry assets (kernel configs,
 extra files) next to their build script.
 
-Successful builds are also packed into $ZPKG_CACHE/binpkgs as
-<name>-<version>[-rN].pkg.tar.gz; install reuses them instead of rebuilding.
+Successful builds are packed into $ZPKG_CACHE/binpkgs as
+<name>-<version>[-rN].pkg.tar.gz only when BUILD_BINPKG=1; install reuses
+them instead of rebuilding. By default work dirs and source archives are
+removed after a successful install.
 `
 
 // installOptions are the flags shared by install/build/upgrade.

@@ -45,6 +45,48 @@ func TestSourceDateEpochAndBuildSettings(t *testing.T) {
 	}
 }
 
+func TestBuildCacheDefaultsAndOverrides(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("ZPKG_ROOT", root)
+	for _, k := range []string{"ZPKG_KEEP_WORKDIR", "ZPKG_BUILD_BINPKG", "ZPKG_KEEP_SOURCES"} {
+		t.Setenv(k, "")
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KeepWorkdir || cfg.BuildBinpkg || cfg.KeepSources {
+		t.Fatalf("defaults KeepWorkdir=%v BuildBinpkg=%v KeepSources=%v, want all false",
+			cfg.KeepWorkdir, cfg.BuildBinpkg, cfg.KeepSources)
+	}
+
+	confDir := filepath.Join(root, "etc", "zpkg")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "build.conf"),
+		[]byte("KEEP_WORKDIR=1\nBUILD_BINPKG=1\nKEEP_SOURCES=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.KeepWorkdir || !cfg.BuildBinpkg || !cfg.KeepSources {
+		t.Fatalf("overrides KeepWorkdir=%v BuildBinpkg=%v KeepSources=%v, want all true",
+			cfg.KeepWorkdir, cfg.BuildBinpkg, cfg.KeepSources)
+	}
+
+	t.Setenv("ZPKG_KEEP_WORKDIR", "0")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KeepWorkdir {
+		t.Fatal("ZPKG_KEEP_WORKDIR=0 did not override build.conf")
+	}
+}
+
 func TestSourceDateEpochDefaultAndValidation(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("ZPKG_ROOT", root)

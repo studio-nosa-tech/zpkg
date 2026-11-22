@@ -345,6 +345,29 @@ binpkg の gzip header と tar 全エントリの mtime は SOURCE_DATE_EPOCH �
 される(所有者・モード・内容・順序はビルドのまま)。work ディレクトリは
 `$ZPKG_CACHE/build/<name>-<version>[-rN][-opts]`。
 
+### ビルドキャッシュ
+
+既定ではディスクを優先し、成功したビルドの作業データを残さない。
+
+```ini
+# /etc/zpkg/build.conf
+KEEP_WORKDIR=0   # インストール成功後に work ディレクトリを削除
+BUILD_BINPKG=0   # ローカル binpkg を作らない
+KEEP_SOURCES=0   # ビルドに使ったソースアーカイブを削除
+```
+
+- `KEEP_WORKDIR=1` で `$ZPKG_CACHE/build/<base>/` を残す
+- `BUILD_BINPKG=1` で成功時に `$ZPKG_CACHE/binpkgs/<base>.pkg.tar.gz` を作る。
+  新しいビルドが成功すると、同じパッケージの古い binpkg は削除される
+- `KEEP_SOURCES=1` でダウンロードしたソースアーカイブを残す
+- 新しいビルドが成功すると、同じパッケージの古い work ディレクトリも削除される
+- `zpkg build` は destroot を成果物として返すため、現在の work ディレクトリは
+  残す。削除は `zpkg install` の成功後
+- 環境変数 `ZPKG_KEEP_WORKDIR` / `ZPKG_BUILD_BINPKG` / `ZPKG_KEEP_SOURCES`
+  が `build.conf` より優先される
+- 0.3.2 以前が作った work ディレクトリはパッケージ名を記録していないため、
+  自動削除の対象外。`$ZPKG_CACHE/build` を手動で削除する
+
 ### ビルドログ
 
 既定で `$ZPKG_CACHE/logs/<base>.log` に stdout/stderr を保存する。ヘッダには
@@ -427,6 +450,9 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
 | `ZPKG_SOURCE_DATE_EPOCH` | `946684800` | 固定ビルド時刻。標準の `SOURCE_DATE_EPOCH` も受け付ける |
 | `ZPKG_BUILD_LOG` | `1` | `0` でビルドログを保存しない |
 | `ZPKG_SBOM` | `1` | `0` で SPDX SBOM を生成しない |
+| `ZPKG_KEEP_WORKDIR` | `0` | `1` で成功後も work ディレクトリを残す |
+| `ZPKG_BUILD_BINPKG` | `0` | `1` で成功時にローカル binpkg を作る |
+| `ZPKG_KEEP_SOURCES` | `0` | `1` でソースアーカイブを残す |
 
 設定ファイル(ターゲットルート配下):
 
@@ -437,7 +463,7 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
 - `/etc/zpkg/sync.conf` — `RECIPEURL=` / `RECIPEGIT=` / `RECIPEBRANCH=` / `RECIPEALLOWUNSIGNED=`(`zpkg sync` の既定ソース)
 - `/etc/zpkg/security.conf` — `TRUSTED_KEYS=` / `ALLOW_UNSIGNED=` / `ALLOW_EXPIRED=`
 - `/etc/zpkg/sandbox.conf` — `SANDBOX=` / `BUILD_NET=` / `BWRAP=`
-- `/etc/zpkg/build.conf` — `SOURCE_DATE_EPOCH=` / `BUILD_LOG=` / `SBOM=`
+- `/etc/zpkg/build.conf` — `SOURCE_DATE_EPOCH=` / `BUILD_LOG=` / `SBOM=` / `KEEP_WORKDIR=` / `BUILD_BINPKG=` / `KEEP_SOURCES=`
 
 ## レシピ形式(ディレクトリ型・KISS 式)
 

@@ -159,6 +159,7 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 	}
 
 	var staged []preparedInstall
+	var sourceResults []*build.Result
 	for i, jb := range jobs {
 		r := jb.r
 		label := pkgLabel(r)
@@ -197,10 +198,21 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 			if _, envHash, envCount := provenance.InstalledEnvironment(db); envCount > 0 {
 				res.BuildEnvHash, res.BuildEnvCount = envHash, envCount
 			}
-			if _, err := build.PackBinpkg(r, res, cfg.Cache, opts.Hash(), cfg.Channel); err != nil {
-				fmt.Fprintln(os.Stderr, "zpkg: binpkg pack failed:", err)
-			} else {
-				phase("Packed binpkg %s", res.ArtifactPath)
+			sourceResults = append(sourceResults, res)
+			// Old work dirs of the same package are always stale once a new
+			// build succeeds; KEEP_WORKDIR only preserves the current one.
+			if err := build.CleanOldWork(r, cfg); err != nil {
+				fmt.Fprintln(os.Stderr, "zpkg: warning: clean old workdir:", err)
+			}
+			if cfg.BuildBinpkg || o.reproCheck {
+				if _, err := build.PackBinpkg(r, res, cfg.Cache, opts.Hash(), cfg.Channel); err != nil {
+					fmt.Fprintln(os.Stderr, "zpkg: binpkg pack failed:", err)
+				} else {
+					phase("Packed binpkg %s", res.ArtifactPath)
+				}
+			}
+			if err := build.CleanOldBinpkgs(r, cfg); err != nil {
+				fmt.Fprintln(os.Stderr, "zpkg: warning: clean old binpkgs:", err)
 			}
 			if o.reproCheck {
 				firstHash := res.ArtifactSHA256
@@ -233,6 +245,13 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 				}
 				res = second
 				reproChecked = true
+				if !cfg.BuildBinpkg {
+					if err := build.RemoveCurrentBinpkg(r, cfg); err != nil {
+						fmt.Fprintln(os.Stderr, "zpkg: warning: remove repro-check binpkg:", err)
+					} else {
+						res.ArtifactPath = ""
+					}
+				}
 			}
 		}
 		meta := metaFromRecipe(r, opts.Use, cfg.Channel)
@@ -293,6 +312,13 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 			return err
 		}
 	}
+	if !cfg.KeepSources {
+		for _, res := range sourceResults {
+			if err := build.RemoveSourceArchives(res, cfg.Cache); err != nil {
+				fmt.Fprintln(os.Stderr, "zpkg: warning: remove source archive:", err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -342,6 +368,11 @@ func applyPrepared(p preparedInstall, cfg config.Config, db pkgdb.DB, targetSet 
 	}
 	refreshLdconfig(cfg)
 	phase("Installed %s", p.label)
+	if !cfg.KeepWorkdir {
+		if err := build.CleanWork(p.r, cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "zpkg: warning: clean workdir:", err)
+		}
+	}
 	return nil
 }
 

@@ -37,6 +37,9 @@ type Config struct {
 	SourceDateEpoch int64 // fixed timestamp for reproducible artifacts
 	BuildLog        bool  // persist build logs under $ZPKG_CACHE/logs
 	SBOM            bool  // write SPDX SBOMs next to artifacts and DB records
+	KeepWorkdir     bool  // keep build work directories after a successful install
+	BuildBinpkg     bool  // create local binpkgs after a source build
+	KeepSources     bool  // keep downloaded source archives after a successful build
 
 	// Release channel selection. Channel is the effective channel; Source
 	// says where it came from ("env", "make.conf", "flag", "default").
@@ -202,6 +205,15 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.SBOM, err = readConfBool(absRoot, "etc/zpkg/build.conf", "ZPKG_SBOM", "SBOM", true); err != nil {
+		return Config{}, err
+	}
+	if cfg.KeepWorkdir, err = readConfBool(absRoot, "etc/zpkg/build.conf", "ZPKG_KEEP_WORKDIR", "KEEP_WORKDIR", false); err != nil {
+		return Config{}, err
+	}
+	if cfg.BuildBinpkg, err = readConfBool(absRoot, "etc/zpkg/build.conf", "ZPKG_BUILD_BINPKG", "BUILD_BINPKG", false); err != nil {
+		return Config{}, err
+	}
+	if cfg.KeepSources, err = readConfBool(absRoot, "etc/zpkg/build.conf", "ZPKG_KEEP_SOURCES", "KEEP_SOURCES", false); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
