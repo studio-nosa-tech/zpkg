@@ -38,9 +38,11 @@ func pkgLabel(r *recipe.Recipe) string {
 
 // planEntry is one line of the pre-build summary.
 type planEntry struct {
-	label  string
-	use    string
-	target bool // named on the command line (not pulled in as a dependency)
+	label          string
+	use            string
+	videoCards     string
+	usesVideoCards bool
+	target         bool // named on the command line (not pulled in as a dependency)
 }
 
 // printPlan lists the packages in the order they will be handled, with
@@ -74,7 +76,11 @@ func printPlan(entries []planEntry, action string) {
 
 	fmt.Printf("\nThese are the packages that %s, in order:\n", action)
 	for i, e := range entries {
-		fmt.Printf("  %-*s  USE=%q\n", width, heads[i], e.use)
+		fmt.Printf("  %-*s  USE=%q", width, heads[i], e.use)
+		if e.usesVideoCards {
+			fmt.Printf(" VIDEO_CARDS=%q", e.videoCards)
+		}
+		fmt.Println()
 	}
 	total := fmt.Sprintf("Total: %d %s", len(entries), plural(len(entries), "package", "packages"))
 	if deps > 0 {
@@ -110,6 +116,11 @@ func useString(r *recipe.Recipe, enabled []string) string {
 	sort.Strings(flags)
 	out := make([]string, 0, len(flags))
 	for _, f := range flags {
+		// video_cards_* entries are declared in iuse only so older zpkg
+		// releases can parse the recipe tree; they are not USE flags.
+		if strings.HasPrefix(f, "video_cards_") {
+			continue
+		}
 		if on[f] {
 			out = append(out, f)
 		} else {

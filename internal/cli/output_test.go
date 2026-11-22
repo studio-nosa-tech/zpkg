@@ -53,6 +53,12 @@ func TestUseString(t *testing.T) {
 	if got := useString(&recipe.Recipe{IUse: []string{"x"}}, nil); got != "-x" {
 		t.Errorf("useString all off = %q, want -x", got)
 	}
+	// video_cards_* iuse entries are compatibility declarations, not USE
+	// flags, and must not appear in the plan output.
+	vc := &recipe.Recipe{IUse: []string{"ssl", "video_cards_iris"}}
+	if got, want := useString(vc, nil), "-ssl"; got != want {
+		t.Errorf("useString with video_cards = %q, want %q", got, want)
+	}
 }
 
 func TestPlural(t *testing.T) {

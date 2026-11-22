@@ -156,11 +156,17 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 	if len(jobs) > 0 && !o.skipPlan {
 		entries := make([]planEntry, len(jobs))
 		for i, jb := range jobs {
-			entries[i] = planEntry{
+			opts := cfg.Options.ForPackage(jb.r.Name)
+			entry := planEntry{
 				label:  pkgLabel(jb.r),
-				use:    useString(jb.r, cfg.Options.ForPackage(jb.r.Name).Use),
+				use:    useString(jb.r, opts.Use),
 				target: jb.target,
 			}
+			if jb.r.UsesVideoCards() {
+				entry.usesVideoCards = true
+				entry.videoCards = strings.Join(opts.VideoCards, " ")
+			}
+			entries[i] = entry
 		}
 		switch {
 		case o.pretend && doInstall:
