@@ -15,6 +15,7 @@ const Version = "0.3.4"
 const usage = `zpkg - ZIGNOS package manager (v` + Version + `)
 
 Usage:
+  zpkg version | --version    print the zpkg version
   zpkg depends [-r] <pkg>...  print build order including dependencies;
                               -r/--reverse prints installed dependents
   zpkg build [-f] [--no-sandbox] [--clean] [--repro-check] <pkg>...
@@ -218,6 +219,9 @@ func Run(args []string) error {
 	switch cmd {
 	case "help", "-h", "--help":
 		fmt.Print(usage)
+		return nil
+	case "version", "-V", "--version":
+		fmt.Printf("zpkg %s\n", Version)
 		return nil
 	case "depends":
 		return cmdDepends(rest)
