@@ -197,6 +197,7 @@ type EnvOptions struct {
 	SourceDir  string
 	RecipeDir  string
 	Name       string
+	Slot       string
 	Version    string
 	Use        string
 	VideoCards string
@@ -213,6 +214,10 @@ type EnvOptions struct {
 // compiler settings are not inherited; proxy variables are the one exception
 // because network-enabled builds may need them.
 func Env(o EnvOptions) []string {
+	slot := o.Slot
+	if slot == "" {
+		slot = "0"
+	}
 	env := []string{
 		"PATH=/usr/bin:/usr/sbin:/bin:/sbin",
 		"HOME=" + path.Join(o.WorkDir, "home"),
@@ -228,6 +233,7 @@ func Env(o EnvOptions) []string {
 		"GOPATH=" + path.Join(o.WorkDir, "gopath"),
 		"GOTOOLCHAIN=local",
 		"ZPKG_NAME=" + o.Name,
+		"ZPKG_SLOT=" + slot,
 		"ZPKG_VERSION=" + o.Version,
 		"ZPKG_RECIPE_DIR=" + o.RecipeDir,
 		"ZPKG_ROOT=" + o.Root,

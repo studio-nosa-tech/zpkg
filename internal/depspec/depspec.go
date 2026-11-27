@@ -3,7 +3,9 @@
 // Supported forms:
 //
 //	foo                    any version
+//	foo@14                 any version in slot 14
 //	>=foo-1.2              version constraint (also >, <=, <, =, !=)
+//	>=foo@14-1.2           constraint on one slot
 //	ssl?openssl            optional dependency: when ssl is enabled
 //	!ssl?gnutls            inverse optional dependency
 //	foo[ssl]               dependency must have ssl enabled
@@ -16,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/studio-nosa-tech/zpkg/internal/pkgid"
 	"github.com/studio-nosa-tech/zpkg/internal/version"
 )
 
@@ -43,6 +46,7 @@ type UseConstraint struct {
 type Atom struct {
 	Raw       string
 	Name      string
+	Slot      string // empty means any slot
 	Op        Operator
 	Version   string // empty when Op is OpAny
 	Use       []UseConstraint
@@ -115,15 +119,29 @@ func Parse(raw string) (Atom, error) {
 		return a, fmt.Errorf("%q: missing package name", raw)
 	}
 	if a.Op == OpAny {
-		if err := checkName(s); err != nil {
+		name, slot, hasSlot, err := splitSlot(s)
+		if err != nil {
 			return a, fmt.Errorf("%q: %w", raw, err)
 		}
-		a.Name = s
+		if hasSlot {
+			a.Slot = slot
+		}
+		if err := checkName(name); err != nil {
+			return a, fmt.Errorf("%q: %w", raw, err)
+		}
+		a.Name = name
 		return a, nil
 	}
 	name, ver, ok := splitVersion(s)
 	if !ok {
 		return a, fmt.Errorf("%q: version constraint needs <name>-<version>", raw)
+	}
+	name, slot, hasSlot, err := splitSlot(name)
+	if err != nil {
+		return a, fmt.Errorf("%q: %w", raw, err)
+	}
+	if hasSlot {
+		a.Slot = slot
 	}
 	if err := checkName(name); err != nil {
 		return a, fmt.Errorf("%q: %w", raw, err)
@@ -143,8 +161,8 @@ func ParseProvided(raw string) (Atom, error) {
 	if err != nil {
 		return a, err
 	}
-	if a.Op != OpAny || a.Condition != "" || len(a.Use) > 0 {
-		return a, fmt.Errorf("%q: provides entries cannot have conditions, USE constraints or operators", raw)
+	if a.Op != OpAny || a.Condition != "" || len(a.Use) > 0 || a.Slot != "" {
+		return a, fmt.Errorf("%q: provides entries cannot have conditions, slots, USE constraints or operators", raw)
 	}
 	if name, ver, ok := splitVersion(a.Name); ok {
 		a.Name, a.Version = name, ver
@@ -166,6 +184,10 @@ func (a Atom) String() string {
 	}
 	b.WriteString(string(a.Op))
 	b.WriteString(a.Name)
+	if a.Slot != "" {
+		b.WriteByte('@')
+		b.WriteString(a.Slot)
+	}
 	if a.Version != "" {
 		b.WriteByte('-')
 		b.WriteString(a.Version)
@@ -227,11 +249,28 @@ func splitVersion(s string) (name, ver string, ok bool) {
 	return s, "", false
 }
 
+// splitSlot splits an optional "@slot" suffix. A slot is part of the package
+// identity, not the version.
+func splitSlot(s string) (name, slot string, has bool, err error) {
+	i := strings.LastIndexByte(s, '@')
+	if i < 0 {
+		return s, "", false, nil
+	}
+	if i == 0 {
+		return "", "", true, fmt.Errorf("missing package name before @")
+	}
+	slot = s[i+1:]
+	if !pkgid.ValidSlot(slot) {
+		return "", "", true, fmt.Errorf("invalid slot %q", slot)
+	}
+	return s[:i], slot, true, nil
+}
+
 func checkName(name string) error {
 	if name == "" {
 		return fmt.Errorf("empty package name")
 	}
-	if strings.ContainsAny(name, " \t[]?") {
+	if strings.ContainsAny(name, " \t[]?@") {
 		return fmt.Errorf("invalid package name %q", name)
 	}
 	return nil

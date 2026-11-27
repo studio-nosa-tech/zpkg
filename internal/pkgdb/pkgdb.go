@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
+	"github.com/studio-nosa-tech/zpkg/internal/pkgid"
 	"github.com/studio-nosa-tech/zpkg/internal/version"
 )
 
@@ -78,15 +79,10 @@ type Rec struct {
 // VersionString is the canonical "pkgver-rN" form.
 func (r *Rec) VersionString() string { return version.String(r.Version, r.Revision) }
 
-// RecKey is the DB directory key for a name/slot pair. Slot "0" (the
+// SlotKey is the DB directory key for a name/slot pair. Slot "0" (the
 // default) keeps the legacy plain-name layout, so records written before
 // slots existed need no migration; other slots get "name@slot".
-func SlotKey(name, slot string) string {
-	if slot == "" || slot == "0" {
-		return name
-	}
-	return name + "@" + slot
-}
+func SlotKey(name, slot string) string { return pkgid.Key(name, slot) }
 
 // Ref identifies one installed record by name and slot.
 type Ref struct {
@@ -128,12 +124,7 @@ func (db DB) List() ([]Ref, error) {
 }
 
 // SplitKey parses a DB directory key back into name and slot.
-func SplitKey(key string) (string, string) {
-	if i := strings.LastIndex(key, "@"); i > 0 {
-		return key[:i], key[i+1:]
-	}
-	return key, "0"
-}
+func SplitKey(key string) (string, string) { return pkgid.Split(key) }
 
 // Get loads the record for a name/slot pair. A slot of "" means "0".
 func (db DB) Get(name, slot string) (*Rec, error) {

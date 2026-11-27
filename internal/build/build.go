@@ -18,18 +18,20 @@ import (
 	"github.com/studio-nosa-tech/zpkg/internal/config"
 	"github.com/studio-nosa-tech/zpkg/internal/hash"
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
+	"github.com/studio-nosa-tech/zpkg/internal/pkgid"
 	"github.com/studio-nosa-tech/zpkg/internal/provenance"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 	"github.com/studio-nosa-tech/zpkg/internal/sandbox"
 	"github.com/studio-nosa-tech/zpkg/internal/source"
 )
 
-// PackageBase is the cache key for a recipe: name-version, plus -rN when the
-// recipe has a revision, plus a short options hash when USE/CFLAGS/MAKEOPTS
-// (and, for video recipes, VIDEO_CARDS) are set. Baking both in keeps builds
-// with different inputs apart.
+// PackageBase is the cache key for a recipe: package key (name or
+// name@slot), version, -rN when the recipe has a revision, and a short
+// options hash when USE/CFLAGS/MAKEOPTS (and, for video recipes, VIDEO_CARDS)
+// are set. Baking all of them in keeps builds with different inputs and
+// different slots apart. Slot 0 keeps the legacy name-version spelling.
 func PackageBase(r *recipe.Recipe, optsHash string) string {
-	base := r.Name + "-" + r.Version
+	base := pkgid.Key(r.Name, r.Slot) + "-" + r.Version
 	if r.Revision > 0 {
 		base += "-r" + strconv.Itoa(r.Revision)
 	}
@@ -109,7 +111,7 @@ func CleanOldWork(r *recipe.Recipe, cfg config.Config) error {
 		}
 		dir := filepath.Join(root, e.Name())
 		data, err := os.ReadFile(filepath.Join(dir, workPackageMarker))
-		if err != nil || strings.TrimSpace(string(data)) != r.Name {
+		if err != nil || strings.TrimSpace(string(data)) != pkgid.Key(r.Name, r.Slot) {
 			continue
 		}
 		if err := os.RemoveAll(dir); err != nil {
@@ -144,7 +146,7 @@ func CleanOldBinpkgs(r *recipe.Recipe, cfg config.Config) error {
 			continue
 		}
 		var m BinMeta
-		if json.Unmarshal(data, &m) != nil || m.Name != r.Name {
+		if json.Unmarshal(data, &m) != nil || pkgid.Key(m.Name, m.Slot) != pkgid.Key(r.Name, r.Slot) {
 			continue
 		}
 		if err := removeBinpkgFiles(root, base); err != nil {
@@ -349,6 +351,9 @@ func LoadBinpkg(r *recipe.Recipe, cfg config.Config) *Result {
 	if json.Unmarshal(data, &m) != nil {
 		return nil
 	}
+	if pkgid.Key(m.Name, m.Slot) != pkgid.Key(r.Name, r.Slot) {
+		return nil
+	}
 	// The cache key has no channel or recipe-content component. A binpkg is
 	// only valid for the exact recipe that produced it; otherwise a channel
 	// switch could silently install another channel's build (for example an
@@ -494,7 +499,7 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 	if err := sandbox.PrepareWork(work); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(work, workPackageMarker), []byte(r.Name+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(work, workPackageMarker), []byte(pkgid.Key(r.Name, r.Slot)+"\n"), 0o644); err != nil {
 		return nil, err
 	}
 	env := sandbox.Env(sandbox.EnvOptions{
@@ -505,6 +510,7 @@ func Run(r *recipe.Recipe, cfg config.Config) (*Result, error) {
 		SourceDir:       src,
 		RecipeDir:       r.Dir,
 		Name:            r.Name,
+		Slot:            r.Slot,
 		Version:         r.Version,
 		Use:             strings.Join(opts.Use, " "),
 		VideoCards:      strings.Join(opts.VideoCards, " "),

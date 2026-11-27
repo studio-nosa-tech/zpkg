@@ -152,6 +152,9 @@ func cmdUpgrade(args []string) error {
 	}
 
 	if hasActions {
+		if plan.Resolution == nil {
+			return fmt.Errorf("internal error: upgrade plan has no resolution")
+		}
 		// New dependencies must be present in the build root before the
 		// packages that need them are built. Install only the additive
 		// KindInstall entries first; upgrades/rebuilds stay deferred so a
@@ -169,7 +172,8 @@ func cmdUpgrade(args []string) error {
 				skipPlan:   true,
 				channel:    o.channel,
 			}
-			if err := cmdBuildInstall(newDeps, true, installOpts); err != nil {
+			keys := keySet(newDeps)
+			if err := installResolved(cfg, plan.Resolution, keys, keys, true, installOpts); err != nil {
 				printUpgradeRecovery(plan, db, before)
 				return fmt.Errorf("upgrade failed: %w", err)
 			}
@@ -186,13 +190,21 @@ func cmdUpgrade(args []string) error {
 				channel:      o.channel,
 			}
 			phase("Building %d package(s) before installing", len(changes))
-			if err := cmdBuildInstall(changes, true, installOpts); err != nil {
+			keys := keySet(changes)
+			if err := installResolved(cfg, plan.Resolution, keys, keys, true, installOpts); err != nil {
 				printUpgradeRecovery(plan, db, before)
 				return fmt.Errorf("upgrade failed: %w", err)
 			}
 		}
-		for _, name := range o.targets {
-			if err := world.Add(cfg.DB, name); err != nil {
+		// Record the resolved key (name@slot) rather than the raw atom, so
+		// "upgrade virtual/foo" stores the provider and ">=foo-2" stores the
+		// package it actually selected.
+		for i, raw := range o.targets {
+			key := raw
+			if i < len(plan.Resolution.Targets) && plan.Resolution.Targets[i] != "" {
+				key = plan.Resolution.Targets[i]
+			}
+			if err := world.Add(cfg.DB, key); err != nil {
 				return err
 			}
 		}
@@ -200,9 +212,9 @@ func cmdUpgrade(args []string) error {
 
 	if o.prune && len(prunable) > 0 {
 		for _, orphan := range prunable {
-			phase("Pruning %s-%s", orphan.Name, orphan.Version)
-			if err := install.Remove(orphan.Name, cfg.Root, db); err != nil {
-				return fmt.Errorf("prune %s: %w", orphan.Name, err)
+			phase("Pruning %s-%s", install.SlotName(orphan.Name, orphan.Slot), orphan.Version)
+			if err := install.RemoveSlot(orphan.Name, orphan.Slot, cfg.Root, db); err != nil {
+				return fmt.Errorf("prune %s: %w", pkgdb.SlotKey(orphan.Name, orphan.Slot), err)
 			}
 		}
 	}
@@ -236,15 +248,16 @@ func printUpgradePlan(plan *upgrade.Plan, o upgradeOptions) {
 	} else {
 		fmt.Println("These are the packages that will be upgraded, in order:")
 		for i, e := range plan.Entries {
+			label := install.SlotName(e.Name, e.Slot)
 			switch e.Kind {
 			case upgrade.KindInstall:
-				fmt.Printf("  [%d] %s %s (new dependency)\n", i+1, e.Name, e.NewVersion)
+				fmt.Printf("  [%d] %s %s (new dependency)\n", i+1, label, e.NewVersion)
 			case upgrade.KindRebuild:
-				fmt.Printf("  [%d] %s %s (rebuild: USE flags changed)\n", i+1, e.Name, e.NewVersion)
+				fmt.Printf("  [%d] %s %s (rebuild: USE flags changed)\n", i+1, label, e.NewVersion)
 			case upgrade.KindDowngrade:
-				fmt.Printf("  [%d] %s %s -> %s (downgrade)\n", i+1, e.Name, e.OldVersion, e.NewVersion)
+				fmt.Printf("  [%d] %s %s -> %s (downgrade)\n", i+1, label, e.OldVersion, e.NewVersion)
 			default:
-				fmt.Printf("  [%d] %s %s -> %s\n", i+1, e.Name, e.OldVersion, e.NewVersion)
+				fmt.Printf("  [%d] %s %s -> %s\n", i+1, label, e.OldVersion, e.NewVersion)
 			}
 			if s := depDiffLine("deps", e.DepsAdded, e.DepsRemoved, e.DepsChanged); s != "" {
 				fmt.Println("      " + s)
@@ -273,7 +286,7 @@ func printUpgradePlan(plan *upgrade.Plan, o upgradeOptions) {
 					note = fmt.Sprintf(" (kept: required by %s)", strings.Join(orphan.RequiredBy, ", "))
 				}
 			}
-			fmt.Printf("  %s-%s%s\n", orphan.Name, orphan.Version, note)
+			fmt.Printf("  %s-%s%s\n", install.SlotName(orphan.Name, orphan.Slot), orphan.Version, note)
 		}
 	}
 
@@ -333,24 +346,34 @@ func splitUpgradeEntries(entries []upgrade.Entry) (newDeps, changes []string) {
 	newDeps = make([]string, 0, len(entries))
 	changes = make([]string, 0, len(entries))
 	for _, e := range entries {
+		key := pkgdb.SlotKey(e.Name, e.Slot)
 		if e.Kind == upgrade.KindInstall {
-			newDeps = append(newDeps, e.Name)
+			newDeps = append(newDeps, key)
 		} else {
-			changes = append(changes, e.Name)
+			changes = append(changes, key)
 		}
 	}
 	return newDeps, changes
 }
 
+func keySet(keys []string) map[string]bool {
+	m := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		m[k] = true
+	}
+	return m
+}
+
 func snapshotVersions(db pkgdb.DB, entries []upgrade.Entry) map[string]string {
 	m := make(map[string]string, len(entries))
 	for _, e := range entries {
+		k := pkgdb.SlotKey(e.Name, e.Slot)
 		rec, err := db.Get(e.Name, e.Slot)
 		if err != nil {
-			m[e.Name] = ""
+			m[k] = ""
 			continue
 		}
-		m[e.Name] = rec.VersionString()
+		m[k] = rec.VersionString()
 	}
 	return m
 }
@@ -358,12 +381,13 @@ func snapshotVersions(db pkgdb.DB, entries []upgrade.Entry) map[string]string {
 func printUpgradeRecovery(plan *upgrade.Plan, db pkgdb.DB, before map[string]string) {
 	var changed []string
 	for _, e := range plan.Entries {
+		k := pkgdb.SlotKey(e.Name, e.Slot)
 		rec, err := db.Get(e.Name, e.Slot)
 		if err != nil {
 			continue
 		}
-		if rec.VersionString() != before[e.Name] {
-			changed = append(changed, fmt.Sprintf("%s %s", e.Name, rec.VersionString()))
+		if rec.VersionString() != before[k] {
+			changed = append(changed, fmt.Sprintf("%s %s", k, rec.VersionString()))
 		}
 	}
 	if len(changed) == 0 {
@@ -392,7 +416,7 @@ func promptYes(question string, def bool) (bool, error) {
 }
 
 // cmdWorld prints the explicitly installed set with the installed version
-// of every slot.
+// of every slot. Entries that name a slot (name@slot) print only that slot.
 func cmdWorld() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -403,14 +427,23 @@ func cmdWorld() error {
 	if err != nil {
 		return err
 	}
-	for _, n := range names {
-		recs, err := db.GetAll(n)
-		if err != nil || len(recs) == 0 {
-			fmt.Printf("%s (not installed)\n", n)
-			continue
+	for _, w := range names {
+		name, slot := pkgdb.SplitKey(w)
+		explicitSlot := strings.ContainsRune(w, '@')
+		recs, err := db.GetAll(name)
+		if err != nil {
+			return err
 		}
+		printed := false
 		for _, rec := range recs {
-			fmt.Printf("%s %s\n", install.SlotName(n, rec.Slot), rec.VersionString())
+			if explicitSlot && rec.Slot != slot {
+				continue
+			}
+			fmt.Printf("%s %s\n", install.SlotName(name, rec.Slot), rec.VersionString())
+			printed = true
+		}
+		if !printed {
+			fmt.Printf("%s (not installed)\n", w)
 		}
 	}
 	return nil

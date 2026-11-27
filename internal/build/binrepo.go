@@ -26,12 +26,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/studio-nosa-tech/zpkg/internal/config"
 	"github.com/studio-nosa-tech/zpkg/internal/hash"
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
+	"github.com/studio-nosa-tech/zpkg/internal/pkgid"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 	"github.com/studio-nosa-tech/zpkg/internal/security"
 	"github.com/studio-nosa-tech/zpkg/internal/sign"
@@ -44,6 +46,7 @@ import (
 type BinMeta struct {
 	Schema   int      `json:"schema"`
 	Name     string   `json:"name"`
+	Slot     string   `json:"slot,omitempty"` // empty means slot 0 (legacy)
 	Version  string   `json:"version"`
 	Revision int      `json:"revision"`
 	UseHash  string   `json:"usehash"` // options hash, "" when no options were set
@@ -76,6 +79,7 @@ func writeBinMeta(dir, base string, r *recipe.Recipe, optsHash, channel string, 
 	m := BinMeta{
 		Schema:   binMetaSchema,
 		Name:     r.Name,
+		Slot:     r.Slot,
 		Version:  r.Version,
 		Revision: r.Revision,
 		UseHash:  optsHash,
@@ -114,6 +118,7 @@ func writeBinMeta(dir, base string, r *recipe.Recipe, optsHash, channel string, 
 // IndexEntry is one binary package in a repository index.
 type IndexEntry struct {
 	Name           string   `json:"name"`
+	Slot           string   `json:"slot,omitempty"` // empty means slot 0
 	Version        string   `json:"version"`
 	Revision       int      `json:"revision"`
 	UseHash        string   `json:"usehash"`
@@ -326,6 +331,7 @@ func indexEntry(dir string, f pkgFile, signed bool) (IndexEntry, error) {
 	if data, err := os.ReadFile(binMetaName(base)); err == nil {
 		if json.Unmarshal(data, &meta) == nil && meta.Name != "" {
 			entry.Name = meta.Name
+			entry.Slot = meta.Slot
 			entry.Version = meta.Version
 			entry.Revision = meta.Revision
 			entry.UseHash = meta.UseHash
@@ -531,10 +537,20 @@ func validateIndex(idx *IndexFile, signed bool) error {
 	if idx.Arch != "" && idx.Arch != runtime.GOARCH {
 		return fmt.Errorf("index arch %q does not match %s", idx.Arch, runtime.GOARCH)
 	}
+	seen := map[string]bool{}
 	for _, e := range idx.Packages {
 		if e.Name == "" {
 			return fmt.Errorf("index entry with empty name")
 		}
+		if e.Slot != "" && !pkgid.ValidSlot(e.Slot) {
+			return fmt.Errorf("%s: invalid slot %q", e.Filename, e.Slot)
+		}
+		key := pkgid.Key(e.Name, e.Slot) + "\x00" + e.Version + "\x00" +
+			strconv.Itoa(e.Revision) + "\x00" + e.UseHash + "\x00" + e.Arch + "\x00" + e.Channel
+		if seen[key] {
+			return fmt.Errorf("%s: duplicate package entry for %s", e.Filename, pkgid.Key(e.Name, e.Slot))
+		}
+		seen[key] = true
 		if err := safeRepoFilename(e.Filename); err != nil {
 			return err
 		}
@@ -570,7 +586,8 @@ func loadRepoBinpkgImpl(r *recipe.Recipe, binRepo, cacheDir, optsHash string, cf
 	}
 	wantDigest := recipeDigestFor(r)
 	for _, e := range idx.Packages {
-		if e.Name != r.Name || (e.Arch != "" && e.Arch != runtime.GOARCH) ||
+		if pkgid.Key(e.Name, e.Slot) != pkgid.Key(r.Name, r.Slot) ||
+			(e.Arch != "" && e.Arch != runtime.GOARCH) ||
 			recipeKey(e.Version, e.Revision) != r.FullVersion() || e.UseHash != optsHash {
 			continue
 		}

@@ -97,6 +97,8 @@ func cmdDepends(args []string) error {
 // dependencies are evaluated with the dependent's recorded USE flags.
 func reverseDependents(cfg config.Config, db pkgdb.DB, targets []string) ([]string, error) {
 	targetNames := map[string]bool{}
+	targetBare := map[string]bool{}
+	targetSlots := map[string]map[string]bool{}
 	targetVersions := map[string][]string{}
 	targetProvides := map[string]bool{}
 	for _, t := range targets {
@@ -105,13 +107,30 @@ func reverseDependents(cfg config.Config, db pkgdb.DB, targets []string) ([]stri
 			return nil, fmt.Errorf("target %q: %w", t, err)
 		}
 		targetNames[a.Name] = true
+		if a.Slot == "" {
+			targetBare[a.Name] = true
+		} else {
+			if targetSlots[a.Name] == nil {
+				targetSlots[a.Name] = map[string]bool{}
+			}
+			targetSlots[a.Name][a.Slot] = true
+		}
 		recs, err := db.GetAll(a.Name)
 		if err == nil {
 			for _, rec := range recs {
+				if a.Slot != "" && rec.Slot != a.Slot {
+					continue
+				}
 				targetVersions[a.Name] = append(targetVersions[a.Name], rec.VersionString())
 			}
 		}
-		if r, err := recipe.Load(cfg.Repos, a.Name); err == nil {
+		var r *recipe.Recipe
+		if a.Slot != "" {
+			r, err = recipe.LoadCandidate(cfg.Repos, pkgdb.SlotKey(a.Name, a.Slot))
+		} else {
+			r, err = recipe.Load(cfg.Repos, a.Name)
+		}
+		if err == nil {
 			for _, raw := range r.Provides {
 				p, err := depspec.ParseProvided(raw)
 				if err == nil {
@@ -125,6 +144,9 @@ func reverseDependents(cfg config.Config, db pkgdb.DB, targets []string) ([]stri
 		// Installed metadata also carries provides from newer records.
 		if recs, err := db.GetAll(a.Name); err == nil {
 			for _, rec := range recs {
+				if a.Slot != "" && rec.Slot != a.Slot {
+					continue
+				}
 				if rec.Meta != nil {
 					for _, raw := range rec.Meta.Provides {
 						if p, err := depspec.ParseProvided(raw); err == nil {
@@ -142,7 +164,8 @@ func reverseDependents(cfg config.Config, db pkgdb.DB, targets []string) ([]stri
 	}
 	out := map[string]bool{}
 	for _, ref := range refs {
-		if targetNames[ref.Name] {
+		if targetNames[ref.Name] &&
+			(targetBare[ref.Name] || targetSlots[ref.Name][ref.Slot]) {
 			continue // the package being removed is not its own reverse dep
 		}
 		rec, err := db.Get(ref.Name, ref.Slot)
@@ -157,7 +180,7 @@ func reverseDependents(cfg config.Config, db pkgdb.DB, targets []string) ([]stri
 			if len(rec.Meta.UseFlags) > 0 {
 				useFlags = rec.Meta.UseFlags
 			}
-		} else if r, err := recipe.Load(cfg.Repos, ref.Name); err == nil {
+		} else if r, err := recipe.LoadCandidate(cfg.Repos, pkgdb.SlotKey(ref.Name, ref.Slot)); err == nil {
 			rawDeps = append(rawDeps, r.Depends...)
 			rawDeps = append(rawDeps, r.MakeDepends...)
 		}
@@ -173,6 +196,9 @@ func reverseDependents(cfg config.Config, db pkgdb.DB, targets []string) ([]stri
 				}
 			}
 			if !targetNames[a.Name] && !targetProvides[a.Name] {
+				continue
+			}
+			if a.Slot != "" && targetSlots[a.Name] != nil && !targetSlots[a.Name][a.Slot] {
 				continue
 			}
 			if vers := targetVersions[a.Name]; len(vers) > 0 {

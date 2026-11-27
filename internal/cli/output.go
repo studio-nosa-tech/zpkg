@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/studio-nosa-tech/zpkg/internal/pkgid"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 )
 
@@ -33,7 +34,7 @@ func useColor() bool {
 
 // pkgLabel is the name-version-rN form used in progress markers.
 func pkgLabel(r *recipe.Recipe) string {
-	return r.Name + "-" + r.FullVersion()
+	return pkgid.Key(r.Name, r.Slot) + "-" + r.FullVersion()
 }
 
 // planEntry is one line of the pre-build summary.

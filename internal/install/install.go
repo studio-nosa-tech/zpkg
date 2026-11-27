@@ -225,9 +225,9 @@ func pruneObsolete(old, rec *pkgdb.Rec, root, backup string, db pkgdb.DB, j *txn
 	return nil
 }
 
-// Remove deletes the files of an installed package and its record. The
-// removal is journalled, so an interrupted removal is finished by the next
-// zpkg operation.
+// Remove deletes the files of every slot of an installed package and their
+// records. The removal is journalled, so an interrupted removal is finished
+// by the next zpkg operation.
 func Remove(name, root string, db pkgdb.DB) error {
 	if msg, err := Recover(root, db); err != nil {
 		return err
@@ -235,59 +235,79 @@ func Remove(name, root string, db pkgdb.DB) error {
 		fmt.Fprintln(os.Stderr, "zpkg:", msg)
 	}
 
-	// Every slot of the package is removed; the files of one slot cannot
-	// overlap another (the conflict rule), so removal is independent.
 	recs, err := db.GetAll(name)
 	if err != nil {
 		return err
 	}
 	for _, rec := range recs {
-		if err := checkIntegrity(rec, root); err != nil {
-			return err
-		}
-		var files []string
-		for _, e := range rec.Entries {
-			if e.Kind != "dir" {
-				files = append(files, e.Path)
-			}
-		}
-		j := &txnJournal{Kind: "remove", Name: rec.Name, Slot: rec.Slot, Version: rec.VersionString(), Phase: phaseRemoving, Files: files}
-		if err := saveJournal(db, j); err != nil {
-			return err
-		}
-
-		// Files and links first (entries are sorted by path, so reverse
-		// iteration is deepest first), then prune now-empty directories.
-		for i := len(rec.Entries) - 1; i >= 0; i-- {
-			e := rec.Entries[i]
-			if e.Kind == "dir" {
-				continue
-			}
-			if err := os.RemoveAll(filepath.Join(root, filepath.FromSlash(e.Path))); err != nil {
-				return err
-			}
-		}
-		for i := len(rec.Entries) - 1; i >= 0; i-- {
-			e := rec.Entries[i]
-			if e.Kind != "dir" {
-				continue
-			}
-			p := filepath.Join(root, filepath.FromSlash(e.Path))
-			// Only prune real, empty directories. In particular /lib, /bin
-			// and /sbin are symlinks in a usr-merged root: os.Remove would
-			// delete the symlink itself, breaking every dynamically linked
-			// binary (linux-firmware's "dir lib" did exactly that in M22).
-			info, err := os.Lstat(p)
-			if err != nil || !info.IsDir() {
-				continue
-			}
-			os.Remove(p) // best effort: only prunes empty dirs
-		}
-		if err := db.Delete(rec.Name, rec.Slot); err != nil {
+		if err := removeRecord(rec, root, db); err != nil {
 			return err
 		}
 	}
 	return os.RemoveAll(txnDir(db))
+}
+
+// RemoveSlot deletes one slot of an installed package. Other slots of the
+// same name are left untouched.
+func RemoveSlot(name, slot, root string, db pkgdb.DB) error {
+	if msg, err := Recover(root, db); err != nil {
+		return err
+	} else if msg != "" {
+		fmt.Fprintln(os.Stderr, "zpkg:", msg)
+	}
+	rec, err := db.Get(name, slot)
+	if err != nil {
+		return err
+	}
+	if err := removeRecord(rec, root, db); err != nil {
+		return err
+	}
+	return os.RemoveAll(txnDir(db))
+}
+
+func removeRecord(rec *pkgdb.Rec, root string, db pkgdb.DB) error {
+	if err := checkIntegrity(rec, root); err != nil {
+		return err
+	}
+	var files []string
+	for _, e := range rec.Entries {
+		if e.Kind != "dir" {
+			files = append(files, e.Path)
+		}
+	}
+	j := &txnJournal{Kind: "remove", Name: rec.Name, Slot: rec.Slot, Version: rec.VersionString(), Phase: phaseRemoving, Files: files}
+	if err := saveJournal(db, j); err != nil {
+		return err
+	}
+
+	// Files and links first (entries are sorted by path, so reverse
+	// iteration is deepest first), then prune now-empty directories.
+	for i := len(rec.Entries) - 1; i >= 0; i-- {
+		e := rec.Entries[i]
+		if e.Kind == "dir" {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, filepath.FromSlash(e.Path))); err != nil {
+			return err
+		}
+	}
+	for i := len(rec.Entries) - 1; i >= 0; i-- {
+		e := rec.Entries[i]
+		if e.Kind != "dir" {
+			continue
+		}
+		p := filepath.Join(root, filepath.FromSlash(e.Path))
+		// Only prune real, empty directories. In particular /lib, /bin
+		// and /sbin are symlinks in a usr-merged root: os.Remove would
+		// delete the symlink itself, breaking every dynamically linked
+		// binary (linux-firmware's "dir lib" did exactly this in M22).
+		info, err := os.Lstat(p)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		os.Remove(p) // best effort: only prunes empty dirs
+	}
+	return db.Delete(rec.Name, rec.Slot)
 }
 
 func checkIntegrity(rec *pkgdb.Rec, root string) error {

@@ -84,6 +84,11 @@ type Plan struct {
 	Orphans         []Orphan
 	Closure         []string
 	Warnings        []string
+
+	// Resolution is the exact candidate set the plan was built from.
+	// installResolved uses it so the build phase cannot pick different
+	// versions by re-resolving the same names.
+	Resolution *resolve.Result
 }
 
 // Actions returns entries that require building/installing.
@@ -122,7 +127,7 @@ func Build(cfg config.Config, db pkgdb.DB, targets []string, opts Options) (*Pla
 	if err != nil {
 		return nil, err
 	}
-	res, err := (&resolve.Resolver{Index: idx, Options: cfg.Options, Installed: recs}).Resolve(targets)
+	res, err := (&resolve.Resolver{Index: idx, Options: cfg.Options, Installed: recs, Prefer: resolve.PreferNewest}).Resolve(targets)
 	if err != nil {
 		return nil, err
 	}
@@ -138,6 +143,7 @@ func Build(cfg config.Config, db pkgdb.DB, targets []string, opts Options) (*Pla
 		Channel:       cfg.Channel,
 		ChannelSource: cfg.ChannelSource,
 		Targets:       append([]string{}, targets...),
+		Resolution:    res,
 	}
 	plan.PreviousChannel = ReadAppliedChannel(db)
 	if plan.PreviousChannel != "" && plan.PreviousChannel != cfg.Channel {
@@ -147,26 +153,26 @@ func Build(cfg config.Config, db pkgdb.DB, targets []string, opts Options) (*Pla
 	}
 
 	closure := make(map[string]bool, len(res.Order))
-	for _, name := range res.Order {
-		closure[name] = true
-		plan.Closure = append(plan.Closure, name)
+	for _, key := range res.Order {
+		closure[key] = true
+		plan.Closure = append(plan.Closure, key)
 
-		c := res.Selected[name]
+		c := res.Selected[key]
 		if c == nil || c.Recipe == nil {
 			continue
 		}
 		r := c.Recipe
-		rec := byKey[pkgdb.SlotKey(name, r.Slot)]
-		use := cfg.Options.ForPackage(name).Use
+		rec := byKey[pkgdb.SlotKey(c.Name, c.Slot)]
+		use := cfg.Options.ForPackage(c.Name).Use
 		e := Entry{
-			Name: name, Slot: r.Slot, NewVersion: r.FullVersion(),
+			Name: c.Name, Slot: c.Slot, NewVersion: r.FullVersion(),
 			Recipe: r, Installed: rec,
 		}
 		if rec == nil {
 			e.Kind = KindInstall
-			if otherSlots := slots[name]; len(otherSlots) > 0 {
+			if otherSlots := slots[c.Name]; len(otherSlots) > 0 {
 				e.Warnings = append(e.Warnings,
-					fmt.Sprintf("installed in slot %s; recipe now uses slot %s (old slot remains)", strings.Join(otherSlots, ","), r.Slot))
+					fmt.Sprintf("installed in slot %s; recipe now uses slot %s (old slot remains)", strings.Join(otherSlots, ","), c.Slot))
 			}
 		} else {
 			e.OldVersion = rec.VersionString()
@@ -192,54 +198,123 @@ func Build(cfg config.Config, db pkgdb.DB, targets []string, opts Options) (*Pla
 }
 
 // installedClosure walks the installed DB from the upgrade targets using the
-// dependencies recorded at install time. Orphans are only packages that
-// were required before this upgrade and are no longer required after it;
-// unrelated installed packages (for example base packages that were never
-// in world) must not be offered for pruning.
+// dependencies recorded at install time. Slots are part of the identity, so
+// the old closure is also slot-aware. Orphans are only packages that were
+// required before this upgrade and are no longer required after it;
+// unrelated installed packages (for example base packages that were never in
+// world) must not be offered for pruning.
 func installedClosure(recs []*pkgdb.Rec, targets []string) map[string]bool {
-	byName := map[string]*pkgdb.Rec{}
-	providers := map[string][]string{}
+	byName := map[string][]*pkgdb.Rec{}
+	providers := map[string][]*pkgdb.Rec{}
 	for _, rec := range recs {
-		if rec.Slot == "0" {
-			byName[rec.Name] = rec
-		}
+		byName[rec.Name] = append(byName[rec.Name], rec)
 		if rec.Meta == nil {
 			continue
 		}
-		for _, p := range rec.Meta.Provides {
-			if a, err := depspec.ParseProvided(p); err == nil && a.Name != "" {
-				providers[a.Name] = append(providers[a.Name], rec.Name)
+		for _, raw := range rec.Meta.Provides {
+			if p, err := depspec.ParseProvided(raw); err == nil && p.Name != "" {
+				providers[p.Name] = append(providers[p.Name], rec)
 			}
 		}
 	}
 	seen := map[string]bool{}
-	queue := append([]string{}, targets...)
-	for len(queue) > 0 {
-		name := queue[0]
-		queue = queue[1:]
-		rec := byName[name]
-		if rec == nil {
-			for _, p := range providers[name] {
-				if rec = byName[p]; rec != nil {
-					break
-				}
-			}
-		}
-		if rec == nil || seen[rec.Name] {
+	var queue []*pkgdb.Rec
+	for _, raw := range targets {
+		a, err := depspec.Parse(raw)
+		if err != nil {
 			continue
 		}
-		seen[rec.Name] = true
+		queue = append(queue, matchInstalled(a, byName, providers)...)
+	}
+	for len(queue) > 0 {
+		rec := queue[0]
+		queue = queue[1:]
+		k := pkgdb.SlotKey(rec.Name, rec.Slot)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
 		if rec.Meta == nil {
 			continue
 		}
-		for depName := range activeDeps(rec.Meta.Depends, rec.Meta.UseFlags) {
-			queue = append(queue, depName)
-		}
-		for depName := range activeDeps(rec.Meta.BuildDeps, rec.Meta.UseFlags) {
-			queue = append(queue, depName)
+		rawDeps := append(append([]string{}, rec.Meta.Depends...), rec.Meta.BuildDeps...)
+		for _, raw := range rawDeps {
+			a, err := depspec.Parse(raw)
+			if err != nil {
+				continue
+			}
+			if a.Condition != "" {
+				enabled := hasRecordedFlag(rec.Meta, a.Condition)
+				if enabled == a.Negated {
+					continue
+				}
+			}
+			queue = append(queue, matchInstalled(a, byName, providers)...)
 		}
 	}
 	return seen
+}
+
+func hasRecordedFlag(meta *pkgdb.Meta, cond string) bool {
+	if card, ok := strings.CutPrefix(cond, "video_cards_"); ok {
+		for _, c := range meta.VideoCards {
+			if c == card {
+				return true
+			}
+		}
+		return false
+	}
+	for _, f := range meta.UseFlags {
+		if f == cond {
+			return true
+		}
+	}
+	return false
+}
+
+// matchInstalled returns every installed record satisfying a. A slot-pinned
+// atom only matches that slot; a bare atom can match any slot.
+func matchInstalled(a depspec.Atom, byName map[string][]*pkgdb.Rec, providers map[string][]*pkgdb.Rec) []*pkgdb.Rec {
+	var out []*pkgdb.Rec
+	seen := map[string]bool{}
+	add := func(rec *pkgdb.Rec, v string) {
+		if a.Slot != "" && rec.Slot != a.Slot {
+			return
+		}
+		if !a.Matches(v) {
+			return
+		}
+		k := pkgdb.SlotKey(rec.Name, rec.Slot)
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, rec)
+	}
+	for _, rec := range byName[a.Name] {
+		add(rec, rec.VersionString())
+	}
+	if a.Slot == "" {
+		for _, rec := range providers[a.Name] {
+			if rec.Name == a.Name {
+				continue
+			}
+			v := rec.VersionString()
+			if rec.Meta != nil {
+				for _, raw := range rec.Meta.Provides {
+					p, err := depspec.ParseProvided(raw)
+					if err == nil && p.Name == a.Name {
+						if p.Version != "" {
+							v = p.Version
+						}
+						break
+					}
+				}
+			}
+			add(rec, v)
+		}
+	}
+	return out
 }
 
 // updatedDeps returns the dependency names each planned package will have
@@ -256,7 +331,7 @@ func updatedDeps(entries []Entry, cfg config.Config) map[string]map[string]bool 
 		for name := range activeDeps(e.Recipe.MakeDepends, use) {
 			names[name] = true
 		}
-		out[e.Name] = names
+		out[pkgdb.SlotKey(e.Name, e.Slot)] = names
 	}
 	return out
 }
@@ -435,13 +510,10 @@ func majorVersion(v string) string {
 }
 
 func findOrphans(recs []*pkgdb.Rec, oldClosure, closure map[string]bool, newDeps map[string]map[string]bool) []Orphan {
-	byName := map[string][]string{}
-	for _, rec := range recs {
-		byName[rec.Name] = append(byName[rec.Name], rec.Slot)
-	}
 	var orphans []Orphan
 	for _, rec := range recs {
-		if rec.Slot != "0" || !oldClosure[rec.Name] || closure[rec.Name] || len(byName[rec.Name]) > 1 {
+		k := pkgdb.SlotKey(rec.Name, rec.Slot)
+		if !oldClosure[k] || closure[k] {
 			continue
 		}
 		// Virtual names this orphan satisfies. They are what dependents
@@ -456,7 +528,7 @@ func findOrphans(recs []*pkgdb.Rec, oldClosure, closure map[string]bool, newDeps
 		}
 		o := Orphan{Name: rec.Name, Slot: rec.Slot, Version: rec.VersionString()}
 		for _, other := range recs {
-			if other.Name == rec.Name || other.Meta == nil {
+			if pkgdb.SlotKey(other.Name, other.Slot) == k || other.Meta == nil {
 				continue
 			}
 			if dependsOn(other, rec.Name, provides, newDeps) {
@@ -466,7 +538,11 @@ func findOrphans(recs []*pkgdb.Rec, oldClosure, closure map[string]bool, newDeps
 		sort.Strings(o.RequiredBy)
 		orphans = append(orphans, o)
 	}
-	sort.Slice(orphans, func(i, j int) bool { return orphans[i].Name < orphans[j].Name })
+	sort.Slice(orphans, func(i, j int) bool {
+		ki := pkgdb.SlotKey(orphans[i].Name, orphans[i].Slot)
+		kj := pkgdb.SlotKey(orphans[j].Name, orphans[j].Slot)
+		return ki < kj
+	})
 	return orphans
 }
 
@@ -474,7 +550,7 @@ func findOrphans(recs []*pkgdb.Rec, oldClosure, closure map[string]bool, newDeps
 // one of the virtual names target provides. Planned packages are evaluated
 // with their new recipe dependencies.
 func dependsOn(rec *pkgdb.Rec, target string, provides map[string]bool, newDeps map[string]map[string]bool) bool {
-	if names, ok := newDeps[rec.Name]; ok {
+	if names, ok := newDeps[pkgdb.SlotKey(rec.Name, rec.Slot)]; ok {
 		if names[target] {
 			return true
 		}
@@ -483,6 +559,9 @@ func dependsOn(rec *pkgdb.Rec, target string, provides map[string]bool, newDeps 
 				return true
 			}
 		}
+		return false
+	}
+	if rec.Meta == nil {
 		return false
 	}
 	for _, raw := range append(append([]string{}, rec.Meta.Depends...), rec.Meta.BuildDeps...) {

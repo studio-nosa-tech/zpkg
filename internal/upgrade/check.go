@@ -34,25 +34,25 @@ func Check(cfg config.Config, db pkgdb.DB, plan *Plan, full bool) (CheckReport, 
 	if err != nil {
 		return report, err
 	}
-	res, err := (&resolve.Resolver{Index: idx, Options: cfg.Options, Installed: recs}).Resolve(plan.Targets)
+	res, err := (&resolve.Resolver{Index: idx, Options: cfg.Options, Installed: recs, Prefer: resolve.PreferNewest}).Resolve(plan.Targets)
 	if err != nil {
 		issues = append(issues, "dependency resolution: "+err.Error())
 	} else {
-		for _, name := range res.Order {
-			c := res.Selected[name]
+		for _, key := range res.Order {
+			c := res.Selected[key]
 			if c == nil || c.Recipe == nil {
 				continue
 			}
-			rec, err := db.Get(name, c.Recipe.Slot)
+			rec, err := db.Get(c.Name, c.Slot)
 			if err != nil {
-				issues = append(issues, fmt.Sprintf("%s: %v", name, err))
+				issues = append(issues, fmt.Sprintf("%s: %v", key, err))
 				continue
 			}
 			report.Packages++
 			report.Files += len(rec.Entries)
 			for _, e := range rec.Entries {
 				if msg := verifyEntry(cfg.Root, e, full); msg != "" {
-					issues = append(issues, name+": "+msg)
+					issues = append(issues, key+": "+msg)
 				}
 			}
 		}

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -41,37 +40,26 @@ func cmdSearch(args []string) error {
 	if err := requireRepos(cfg); err != nil {
 		return err
 	}
-	seen := map[string]bool{}
-	for _, repo := range cfg.Repos {
-		items, err := os.ReadDir(repo)
-		if err != nil {
-			return err
+	recipes, err := recipe.ScanRepos(cfg.Repos)
+	if err != nil {
+		return err
+	}
+	for _, r := range recipes {
+		nameHit := strings.Contains(r.Name, term)
+		providesHit := ""
+		for _, p := range r.Provides {
+			if strings.Contains(p, term) {
+				providesHit = p
+				break
+			}
 		}
-		for _, it := range items {
-			if !it.IsDir() || strings.HasPrefix(it.Name(), ".") || seen[it.Name()] {
-				continue
-			}
-			seen[it.Name()] = true
-			r, err := recipe.Load(cfg.Repos, it.Name())
-			if err != nil {
-				return err
-			}
-			nameHit := strings.Contains(r.Name, term)
-			providesHit := ""
-			for _, p := range r.Provides {
-				if strings.Contains(p, term) {
-					providesHit = p
-					break
-				}
-			}
-			if !nameHit && providesHit == "" {
-				continue
-			}
-			if nameHit {
-				fmt.Printf("%s %s %s\n", filepath.Base(repo), r.Name, r.FullVersion())
-			} else {
-				fmt.Printf("%s %s %s (provides %s)\n", filepath.Base(repo), r.Name, r.FullVersion(), providesHit)
-			}
+		if !nameHit && providesHit == "" {
+			continue
+		}
+		if nameHit {
+			fmt.Printf("%s %s %s\n", filepath.Base(r.Repo), r.Key(), r.FullVersion())
+		} else {
+			fmt.Printf("%s %s %s (provides %s)\n", filepath.Base(r.Repo), r.Key(), r.FullVersion(), providesHit)
 		}
 	}
 	return nil
@@ -84,11 +72,18 @@ func cmdInfo(names []string) error {
 		return err
 	}
 	db := pkgdb.DB{Dir: cfg.DB}
-	for _, name := range names {
+	for _, arg := range names {
+		name, slot := pkgdb.SplitKey(arg)
+		explicitSlot := strings.ContainsRune(arg, '@')
 		recs, gerr := db.GetAll(name)
-		fmt.Println(name + ":")
+		fmt.Println(arg + ":")
+		printed := false
 		if gerr == nil {
 			for _, rec := range recs {
+				if explicitSlot && rec.Slot != slot {
+					continue
+				}
+				printed = true
 				line := fmt.Sprintf("  installed: %s", rec.VersionString())
 				if rec.Meta != nil {
 					if rec.Meta.Slot != "" {
@@ -160,14 +155,15 @@ func cmdInfo(names []string) error {
 					fmt.Println("  sbom: SPDX 2.3")
 				}
 			}
-		} else {
+		}
+		if !printed {
 			fmt.Println("  installed: -")
 		}
 
 		if len(cfg.Repos) == 0 {
 			continue
 		}
-		r, err := recipe.Load(cfg.Repos, name)
+		cands, err := recipe.LoadCandidates(cfg.Repos, name)
 		if err != nil {
 			if gerr != nil {
 				return err
@@ -175,7 +171,23 @@ func cmdInfo(names []string) error {
 			fmt.Println("  available: (no recipe in the configured repos)")
 			continue
 		}
-		fmt.Printf("  available: %s (slot %s, repo %s)\n", r.FullVersion(), r.Slot, filepath.Base(r.Repo))
+		if explicitSlot {
+			var filtered []*recipe.Recipe
+			for _, c := range cands {
+				if c.Slot == slot {
+					filtered = append(filtered, c)
+				}
+			}
+			cands = filtered
+		}
+		if len(cands) == 0 {
+			fmt.Println("  available: (no recipe in the configured repos)")
+			continue
+		}
+		for _, c := range cands {
+			fmt.Printf("  available: %s (slot %s, repo %s)\n", c.FullVersion(), c.Slot, filepath.Base(c.Repo))
+		}
+		r := cands[0]
 		if len(r.Depends) > 0 {
 			fmt.Printf("  depends: %s\n", joinDeps(r.Depends))
 		}

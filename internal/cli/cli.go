@@ -10,7 +10,7 @@ import (
 )
 
 // Version is the zpkg release version shipped by this source tree.
-const Version = "0.3.4"
+const Version = "0.4.0"
 
 const usage = `zpkg - ZIGNOS package manager (v` + Version + `)
 
@@ -42,11 +42,12 @@ Usage:
                               --allow-downgrade  permit channel downgrades
                               --channel  override the channel for this run
                               --verify  hash every file in the final check
-  zpkg remove [-f] <pkg>...   remove installed packages (all slots) and
-                              their world entries; -f skips the reverse-
-                              dependency safety check
+  zpkg remove [-f] <pkg[@slot]>...
+                              remove installed packages and their world
+                              entries; pkg@slot removes one slot, pkg removes
+                              all slots; -f skips the reverse-dependency check
   zpkg list                   list installed packages
-  zpkg info <pkg>...          installed metadata and the available recipe
+  zpkg info <pkg[@slot]>...   installed metadata and all available recipes
   zpkg owner <path>...        which package owns a path
   zpkg world                  packages installed explicitly
   zpkg search <term>          search recipe repos

@@ -18,6 +18,7 @@ import (
 	"github.com/studio-nosa-tech/zpkg/internal/provenance"
 	"github.com/studio-nosa-tech/zpkg/internal/recipe"
 	"github.com/studio-nosa-tech/zpkg/internal/recipesig"
+	"github.com/studio-nosa-tech/zpkg/internal/resolve"
 	"github.com/studio-nosa-tech/zpkg/internal/world"
 )
 
@@ -97,60 +98,86 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 	if err := os.MkdirAll(cfg.Cache, 0o755); err != nil {
 		return err
 	}
-	db := pkgdb.DB{Dir: cfg.DB}
-	installed := map[string]string{} // name@slot -> installed version
-	refs, err := db.List()
-	if err != nil {
-		return err
-	}
-	for _, ref := range refs {
-		rec, err := db.Get(ref.Name, ref.Slot)
-		if err != nil {
-			return err
-		}
-		installed[pkgdb.SlotKey(ref.Name, ref.Slot)] = rec.VersionString()
-	}
-
-	plan, err := resolvePlan(cfg, targets)
+	res, err := resolvePlan(cfg, targets)
 	if err != nil {
 		return err
 	}
 	targetSet := map[string]bool{}
-	for _, name := range plan.Targets {
-		if name != "" {
-			targetSet[name] = true
+	for _, key := range res.Targets {
+		if key != "" {
+			targetSet[key] = true
 		}
 	}
-	// Load every recipe first: the pre-build plan and the "(i of n)" in the
-	// progress markers need the list of packages that will actually be
+	return installResolved(cfg, res, nil, targetSet, doInstall, o)
+}
+
+// installResolved builds and installs a pre-resolved plan. handleKeys limits
+// the job list to a subset of res.Order (nil means every selected package);
+// targetKeys marks the packages that are explicit targets for force/world
+// handling. upgrade uses handleKeys to install new dependencies first and
+// changed packages later without re-resolving (which could pick different
+// candidates).
+func installResolved(cfg config.Config, res *resolve.Result, handleKeys, targetKeys map[string]bool, doInstall bool, o installOptions) error {
+	db := pkgdb.DB{Dir: cfg.DB}
+	recs, err := installedRecs(cfg)
+	if err != nil {
+		return err
+	}
+	installed := map[string]string{}
+	recByKey := map[string]*pkgdb.Rec{}
+	for _, rec := range recs {
+		k := pkgdb.SlotKey(rec.Name, rec.Slot)
+		installed[k] = rec.VersionString()
+		recByKey[k] = rec
+	}
+
+	// Collect every recipe first: the pre-build plan and the "(i of n)" in
+	// the progress markers need the list of packages that will actually be
 	// handled (skipped ones do not count).
 	var jobs []installJob
-	for _, name := range plan.Order {
-		r, err := recipe.Load(cfg.Repos, name)
-		if err != nil {
-			return err
+	for _, key := range res.Order {
+		if handleKeys != nil && !handleKeys[key] {
+			continue
 		}
-		// A record exists for this name AND slot: it is an upgrade. Other
+		c := res.Selected[key]
+		if c == nil {
+			continue
+		}
+		r := c.Recipe
+		if r == nil {
+			// Installed outside the recipe tree: it satisfies dependencies
+			// but there is nothing to rebuild.
+			if o.force || o.clean || o.reproCheck {
+				return fmt.Errorf("%s: installed but no recipe is available; cannot rebuild", key)
+			}
+			phase("Skipping %s (installed, no recipe)", key)
+			continue
+		}
+		// A record exists for this package key: it is an upgrade. Other
 		// slots of the same name stay installed (that is the point of
-		// slots). With force every named target is rebuilt and
-		// reinstalled; dependencies that are already present are still
-		// skipped so only the requested packages are replaced.
+		// slots). With force every selected package is rebuilt and
+		// reinstalled.
 		// --clean/--repro-check are explicit "build it now" requests even if
 		// the package is installed, because a cached binpkg would hide the
 		// source build they are meant to exercise.
-		explicitBuild := (o.clean || o.reproCheck) && targetSet[name]
-		have, installedHere := installed[pkgdb.SlotKey(name, r.Slot)]
-		// "install pkg" follows the same UX as other package managers:
-		// naming an installed package with a different version/revision
-		// upgrades (or downgrades) it. Dependencies are still skipped so an
-		// unrelated install does not rebuild the world.
-		versionChanged := targetSet[name] && installedHere && have != r.FullVersion()
-		skip := installedHere && !(o.force && targetSet[name]) && !explicitBuild && !versionChanged
+		explicitBuild := (o.clean || o.reproCheck) && targetKeys[key]
+		have, installedHere := installed[key]
+		metaChanged := false
+		if installedHere {
+			if rec := recByKey[key]; rec != nil {
+				metaChanged = resolve.MetadataChanged(c, rec, cfg.Options)
+			}
+		}
+		// Dependencies are skipped only when the selected version and its
+		// metadata are already installed. A dependency that must change to
+		// satisfy a version constraint is rebuilt like a target.
+		skip := installedHere && have == c.Version && !metaChanged &&
+			!(o.force && targetKeys[key]) && !explicitBuild
 		if skip {
 			phase("Skipping %s (already installed)", pkgLabel(r))
 			continue
 		}
-		jobs = append(jobs, installJob{r: r, target: targetSet[name]})
+		jobs = append(jobs, installJob{r: r, target: targetKeys[key]})
 	}
 
 	if len(jobs) > 0 && !o.skipPlan {
@@ -328,12 +355,12 @@ func cmdBuildInstall(targets []string, doInstall bool, o installOptions) error {
 			staged = append(staged, p)
 			continue
 		}
-		if err := applyPrepared(p, cfg, db, targetSet, o); err != nil {
+		if err := applyPrepared(p, cfg, db, targetKeys, o); err != nil {
 			return err
 		}
 	}
 	for _, p := range staged {
-		if err := applyPrepared(p, cfg, db, targetSet, o); err != nil {
+		if err := applyPrepared(p, cfg, db, targetKeys, o); err != nil {
 			return err
 		}
 	}
@@ -383,8 +410,8 @@ func applyPrepared(p preparedInstall, cfg config.Config, db pkgdb.DB, targetSet 
 	// Only packages named on the command line (or the providers chosen
 	// for virtual targets) become world members; dependencies are
 	// tracked but not part of the world set.
-	if targetSet[p.r.Name] && !o.asdeps {
-		if err := world.Add(cfg.DB, p.r.Name); err != nil {
+	if targetSet[pkgdb.SlotKey(p.r.Name, p.r.Slot)] && !o.asdeps {
+		if err := world.Add(cfg.DB, pkgdb.SlotKey(p.r.Name, p.r.Slot)); err != nil {
 			return err
 		}
 	}
@@ -416,7 +443,7 @@ func cmdRemove(args []string) error {
 		}
 	}
 	if len(names) == 0 {
-		return fmt.Errorf("usage: zpkg remove [-f] <pkg>...")
+		return fmt.Errorf("usage: zpkg remove [-f] <pkg[@slot]>...")
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -433,14 +460,24 @@ func cmdRemove(args []string) error {
 				strings.Join(names, " "), strings.Join(dependents, ", "))
 		}
 	}
-	for i, name := range names {
-		phase("Removing (%d of %d) %s", i+1, len(names), name)
+	for i, arg := range names {
+		name, slot := pkgdb.SplitKey(arg)
+		explicitSlot := strings.ContainsRune(arg, '@')
+		phase("Removing (%d of %d) %s", i+1, len(names), arg)
 		// The recipe may be gone from the tree; hooks are best-effort.
-		r, _ := recipe.Load(cfg.Repos, name)
-		if err := install.Remove(name, cfg.Root, db); err != nil {
-			return err
+		var r *recipe.Recipe
+		if explicitSlot {
+			r, _ = recipe.LoadCandidate(cfg.Repos, pkgdb.SlotKey(name, slot))
+			if err := install.RemoveSlot(name, slot, cfg.Root, db); err != nil {
+				return err
+			}
+		} else {
+			r, _ = recipe.Load(cfg.Repos, name)
+			if err := install.Remove(name, cfg.Root, db); err != nil {
+				return err
+			}
 		}
-		if err := world.Remove(cfg.DB, name); err != nil {
+		if err := removeWorldEntry(cfg, name, arg, explicitSlot); err != nil {
 			return err
 		}
 		if r != nil {
@@ -449,7 +486,28 @@ func cmdRemove(args []string) error {
 			}
 		}
 		refreshLdconfig(cfg)
-		phase("Removed %s", name)
+		phase("Removed %s", arg)
+	}
+	return nil
+}
+
+// removeWorldEntry drops the exact key for an explicit slot removal, or
+// every world entry of the package when all slots are removed.
+func removeWorldEntry(cfg config.Config, name, arg string, explicitSlot bool) error {
+	if explicitSlot {
+		return world.Remove(cfg.DB, arg)
+	}
+	entries, err := world.Read(cfg.DB)
+	if err != nil {
+		return err
+	}
+	for _, w := range entries {
+		wn, _ := pkgdb.SplitKey(w)
+		if wn == name {
+			if err := world.Remove(cfg.DB, w); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -467,8 +525,13 @@ func runHook(cfg config.Config, r *recipe.Recipe, hook string) error {
 		}
 		return err
 	}
+	slot := r.Slot
+	if slot == "" {
+		slot = "0"
+	}
 	env := []string{
 		"ZPKG_NAME=" + r.Name,
+		"ZPKG_SLOT=" + slot,
 		"ZPKG_VERSION=" + r.FullVersion(),
 		"ZPKG_ROOT=" + cfg.Root,
 		"ZPKG_USE=" + strings.Join(cfg.Options.ForPackage(r.Name).Use, " "),

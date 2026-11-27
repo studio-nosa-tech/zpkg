@@ -57,12 +57,12 @@ Total: 2 packages (1 target, 1 dependency)
 | `build [-f] [--no-sandbox] [--clean] [--repro-check] <pkg>...` | fetch → 検証 → destroot まで(インストールしない)。build は既定で bubblewrap 内。`--clean` は work を削除、`--repro-check` は 2 回ビルドして manifest 比較 |
 | `install [-f] [-p] [--asdeps] [--no-sandbox] [--clean] [--repro-check] <pkg>...` | 必要ならビルドして `$ZPKG_ROOT` へ。`-p` は pretend、`--asdeps` は world に追加しない。`--clean` / `--repro-check` はキャッシュを使わずソースビルド |
 | `upgrade [-p] [-y] [--newuse] [--prune] [--allow-downgrade] [--channel <ch>] [--verify] [pkg]...` | world(または指定 pkg)を選択チャンネルの版へ。変更一覧・依存差分・警告を表示し、新規依存を先にインストールしてから全ビルド成功後にアップグレードをインストール。`--newuse` は USE 変更時に再ビルド、`--prune` は孤立依存を削除、`--allow-downgrade` はダウングレードを許可、`--verify` は全ファイルの sha256 を検証 |
-| `remove [-f] <pkg>...` | 全スロットを削除し world から除去。逆依存がある場合は停止(`-f` で強制) |
+| `remove [-f] <pkg[@slot]>...` | `pkg@slot` はそのスロットだけ、`pkg` は全スロットを削除し world から除去。逆依存がある場合は停止(`-f` で強制) |
 | `list` | インストール済み一覧(`name@slot` 表示) |
-| `info <pkg>...` | インストール済みメタデータとレシピの版 |
+| `info <pkg[@slot]>...` | インストール済みメタデータと利用可能な全バージョン/スロット |
 | `owner <path>...` | パスの所有パッケージ |
-| `world` | 明示インストール一覧 |
-| `search <term>` | レシピ検索 |
+| `world` | 明示インストール一覧(`name@slot` はその slot のみ表示) |
+| `search <term>` | レシピ検索(バージョン/スロットごと) |
 | `use [flag\|-flag]...` / `use --package <pkg> ...` | USE フラグの表示・編集(グローバル / package.use) |
 | `mkindex [--key <private>] [--generation N] [--expires ...] [dir]` | binpkg リポジトリ用 `index.json` を生成。`--key` で署名し `keys/<keyid>.pub` も出力 |
 | `sync [--from <src>] [--dest <dir>] [--git] [--branch <name>] [-n] [--allow-unsigned]` | レシピツリー全体を stage3/レシピ tarball・ディレクトリ・URL・git リポジトリから置換。署名付き `recipes.manifest` を検証 |
@@ -487,11 +487,29 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
 
 空行と `#` コメントは無視。`build` は `bash` で実行され、`$ZPKG_DESTROOT` に
 成果物を置く契約(`make DESTDIR="$ZPKG_DESTROOT" install` 等)。渡される環境:
-`ZPKG_NAME` / `ZPKG_VERSION` / `ZPKG_RECIPE_DIR` / `ZPKG_ROOT` / `ZPKG_CACHE` /
+`ZPKG_NAME` / `ZPKG_SLOT` / `ZPKG_VERSION` / `ZPKG_RECIPE_DIR` / `ZPKG_ROOT` / `ZPKG_CACHE` /
 `ZPKG_DESTROOT` / `ZPKG_SRC` / `ZPKG_WORKDIR` / `ZPKG_USE` / `ZPKG_CFLAGS` /
 `ZPKG_MAKEOPTS` / `ZPKG_SANDBOX` / `ZPKG_BUILD_NET`。再現性のため
 `SOURCE_DATE_EPOCH` / `KBUILD_BUILD_TIMESTAMP` / `KBUILD_BUILD_USER` /
 `KBUILD_BUILD_HOST` / `PYTHONHASHSEED=0` も渡す。レシピは `umask 022` で実行される。
+
+### 複数バージョンとスロット
+
+```
+<repo>/<name>/...                         # slot 0(従来)。slot ファイルで変更可
+<repo>/<name>@<slot>/...                  # ディレクトリ名で slot を固定
+<repo>/<name>/versions/<variant>/...      # 同一 slot の複数バージョン
+<repo>/<name>@<slot>/versions/<variant>/...
+```
+
+- `versions/` は直下に `version` が無い場合だけ候補として走査する。各 variant は
+  通常のレシピ(`version` / `revision` / `build` ...)を持つ
+- `@slot` と `slot` ファイルが両方あり不一致ならエラー。slot は
+  `[A-Za-z0-9._+-]+` のみ
+- 1 slot にインストールできるのは 1 バージョン。複数バージョンの共存は slot を
+  分ける(`openssl@1.1` / `openssl@3` など)
+- `@` はパッケージ名で予約。依存は `foo@14` のように slot を指定できる
+- 同じパッケージキーは最初のリポジトリが勝つ(そのリポジトリの全バージョンを使う)
 
 - `sources` の URL に `#ファイル名` を付けるとキャッシュ名を指定できる
 - `.patch` / `.diff` は展開されず `$ZPKG_SRC` に置かれる
@@ -503,8 +521,10 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
 
 | 例 | 意味 |
 |---|---|
-| `foo` | 任意バージョンの `foo` |
+| `foo` | 任意バージョン・任意 slot の `foo` |
+| `foo@14` | slot 14 の `foo`(slot 0 は裸の `foo`) |
 | `>=foo-1.2` / `<foo-2.0` / `=foo-1.2-r3` | バージョン制約(`>`, `<=`, `!=` も可) |
+| `>=foo@14-1.2` | slot 14 の 1.2 以上 |
 | `ssl?openssl` | `ssl` が有効なときだけ `openssl` |
 | `!ssl?gnutls` | `ssl` が無効なときだけ `gnutls` |
 | `foo[ssl]` / `foo[-ssl]` | 依存先の `ssl` が有効 / 無効であること |
@@ -514,26 +534,37 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
 - バージョン制約は演算子付きで書く。`foo-1.2` はパッケージ名として扱う
   (名前に `-` と数字を含むパッケージがあるため)
 - `provides` は `virtual/mailer` または `virtual/mailer-1.2`。バージョン省略時は
-  提供側パッケージのバージョンを使う
+  提供側パッケージのバージョンを使う。provides は slot を持てない
 - `conflicts` はバージョン制約・virtual 名も書ける。選択済みパッケージと
   インストール済みパッケージの両方に対して検査する
 - 条件フラグは依存元レシピの `iuse` に存在する必要がある
-- リゾルバは決定的なバックトラック方式:
-  - 直接レシピと `provides` の候補を、インストール済み → 直接名 → 名前順で試す
-  - バージョン / USE 制約を満たさない候補と、conflict する候補を除外
-  - 失敗したら別の provider / 候補へ戻る
-  - `virtual/foo` を install すると provider を選び、provider を world に記録する
+- リゾルバは **CDCL SAT ソルバー**(`internal/sat`)で候補を選ぶ:
+  - 全レシピ候補(複数バージョン/slot)と、レシピが消えたインストール済み
+    パッケージを同じ候補宇宙で扱う
+  - target / depends / makedepends / conflicts / provides / 条件依存 /
+    USE 制約 / slot を制約として符号化する
+  - 同じ `name@slot` の候補は高々 1 つ。異なる slot は共存できる
+  - インストール済みパッケージとの conflict は、その slot の別候補へ置換すれば
+    解消できる場合、置換候補を選ぶ(実際に置換されるのは version または
+    依存/provides/conflicts メタデータが変わるとき)
+  - `PreferInstalled`(install/depends の既定)はインストール済み版を優先、
+    `PreferNewest`(upgrade/check)は最新版を優先する。複数候補がある slot だけ
+    lexicographic に追加求解して選好を強化する
+  - 依存が循環する場合は、循環した候補集合を禁止する節を追加して別解を探す
+  - 解けない場合は target の unsat core を最小化し、満たせない依存や
+    conflict を表示する
+- `zpkg install virtual/foo` は provider を選び、provider を world に記録する
 - `zpkg depends -r <pkg>` はインストール済みの逆依存を表示する。
   `zpkg remove` は逆依存があると停止し、`-f` で強制できる
-- **SAT solver は未実装**。現在はバックトラック解決で、候補選択の API は
-  将来 SAT バックエンドへ差し替えられるよう `internal/resolve` に分離している
-- 制限: レシピは名前ごとに 1 バージョン(複数バージョン/スロットは解決対象外)。
-  逆依存はインストール済み DB を基準にする
+- `zpkg remove pkg@slot` はその slot だけ削除する。slot を書かない場合は全 slot
+- `zpkg install` は依存も選択版に合わせて更新し得る(バージョン制約を満たすため)。
+  既に同じ版・同じメタデータで入っている依存はスキップする
 
 ## 実装済みの機能
 
-- 依存解決: 依存アトムのバックトラック解決(バージョン制約、provides、conflicts、
-  条件依存、USE 制約)。依存が先のトポロジカルソート、循環はエラー
+- 依存解決: CDCL SAT による候補選択(複数バージョン/スロット、バージョン制約、
+  provides、conflicts、条件依存、USE/VIDEO_CARDS 制約、インストール済み
+  パッケージとの置換)。依存が先のトポロジカルソート、循環は別候補を探索
 - USE フラグ: `use.conf` / `package.use` / 環境変数、`iuse` による条件付き依存
   (`flag?pkg` / `!flag?pkg`)の検証、実効 USE の binpkg キーへの反映
 - binpkg: ローカルキャッシュ(`binpkgs/`)とリポジトリ(`ZPKG_BINREPO` + `mkindex`)。
@@ -550,7 +581,8 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
   `umask 022`、binpkg の tar/gzip mtime 正規化、work dir のパッケージ単位化、
   ビルドログ(`$ZPKG_CACHE/logs/`)、`provenance.json`、SPDX 2.3 SBOM、
   `--repro-check`(2 回ビルドの manifest 比較)
-- slots: `name@slot` レコード。別スロットとのファイル重複はエラー
+- slots: `name@slot` レコード。別スロットとのファイル重複はエラー。
+  binpkg キャッシュと binrepo のキーにも slot を含む(slot 0 は従来の名前)
 - world / upgrade: 明示インストール集合の追跡、`--newuse`、upgrade 時の
   不要ファイル削除(内容一致時のみ、ロールバック可能)
 - リリースチャンネル: `stable` / `testing` / `unstable` の選択
@@ -566,8 +598,16 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
 
 ## 既知の制限
 
-- SAT solver / 複数バージョン・スロットを考慮した完全なソルバーは未実装
-  (現在は決定的バックトラック。1 名 1 バージョンのレシピツリーが前提)
+- 1 slot に同時にインストールできるのは 1 バージョン。複数バージョンを同時に
+  使うには slot を分ける
+- 選好はソフト制約。複数候補がある slot は lexicographic に強化するが、
+  全体最適(MaxSAT)ではない
+- 依存の循環は CNF で表現せず、モデル後に循環した候補集合を禁止して再求解する
+  (最大 20 回)。それでも解けなければエラー
+- `versions/` レイアウトは直下に `version` が無い場合だけ使う。`versions/` の
+  直下はすべて variant ディレクトリで、それぞれ `version` を持つ必要がある
+- `@` はパッケージ名で予約された。従来 `@` を含むディレクトリ名は slot として
+  解釈される
 - 公開 binpkg リポジトリの運用・鍵配布は未整備(署名の仕組みと `keys/` 出力は実装済み)
 - 鍵失効リスト(CRL)は未対応。`key remove` によるローテーションで運用する
 - GPG/OpenPGP は未対応。署名 envelope の `algorithm` を拡張して将来追加する
@@ -588,7 +628,7 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
   `zpkg recover` で復旧する
 - チャンネル間で version+revision が同じパッケージは upgrade で再インストール
   されない(内容を変えたら revision を上げる。強制は `install -f`)
-- 孤立パッケージの検出は slot 0 のみ。複数スロットを持つパッケージは
-  `--prune` の対象外
+- 孤立パッケージの検出は slot 単位。複数 slot を持つパッケージでも、不要に
+  なった slot だけを `--prune` の対象にできる
 - 素の `chroot` では bwrap の `pivot_root` が使えないため、`auto` は警告して
   直接ビルドにフォールバックする。stage3 では `zignos-enter.sh` を使う

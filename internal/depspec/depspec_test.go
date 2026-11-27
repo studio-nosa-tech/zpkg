@@ -6,21 +6,27 @@ func TestParse(t *testing.T) {
 	cases := []struct {
 		raw       string
 		name      string
+		slot      string
 		op        Operator
 		version   string
 		condition string
 		negated   bool
 		use       int
 	}{
-		{"foo", "foo", OpAny, "", "", false, 0},
-		{">=libgpg-error-1.2", "libgpg-error", OpGE, "1.2", "", false, 0},
-		{"<=python3-3.14.10", "python3", OpLE, "3.14.10", "", false, 0},
-		{"=foo-1.2-r3", "foo", OpEQ, "1.2-r3", "", false, 0},
-		{"ssl?openssl", "openssl", OpAny, "", "ssl", false, 0},
-		{"!ssl?gnutls", "gnutls", OpAny, "", "ssl", true, 0},
-		{"foo[ssl,-zlib]", "foo", OpAny, "", "", false, 2},
-		{"foo[ssl?]", "foo", OpAny, "", "", false, 1},
-		{"ssl?foo[ssl?,bar]", "foo", OpAny, "", "ssl", false, 2},
+		{"foo", "foo", "", OpAny, "", "", false, 0},
+		{"foo@14", "foo", "14", OpAny, "", "", false, 0},
+		{"foo-bar@1.1", "foo-bar", "1.1", OpAny, "", "", false, 0},
+		{">=libgpg-error-1.2", "libgpg-error", "", OpGE, "1.2", "", false, 0},
+		{">=foo@14-2.0", "foo", "14", OpGE, "2.0", "", false, 0},
+		{"=foo@14-1.2-r3", "foo", "14", OpEQ, "1.2-r3", "", false, 0},
+		{"<=python3-3.14.10", "python3", "", OpLE, "3.14.10", "", false, 0},
+		{"=foo-1.2-r3", "foo", "", OpEQ, "1.2-r3", "", false, 0},
+		{"ssl?openssl", "openssl", "", OpAny, "", "ssl", false, 0},
+		{"!ssl?gnutls", "gnutls", "", OpAny, "", "ssl", true, 0},
+		{"ssl?foo@14[ssl,-zlib]", "foo", "14", OpAny, "", "ssl", false, 2},
+		{"foo[ssl,-zlib]", "foo", "", OpAny, "", "", false, 2},
+		{"foo[ssl?]", "foo", "", OpAny, "", "", false, 1},
+		{"ssl?foo[ssl?,bar]", "foo", "", OpAny, "", "ssl", false, 2},
 	}
 	for _, c := range cases {
 		a, err := Parse(c.raw)
@@ -28,7 +34,7 @@ func TestParse(t *testing.T) {
 			t.Errorf("Parse(%q): %v", c.raw, err)
 			continue
 		}
-		if a.Name != c.name || a.Op != c.op || a.Version != c.version ||
+		if a.Name != c.name || a.Slot != c.slot || a.Op != c.op || a.Version != c.version ||
 			a.Condition != c.condition || a.Negated != c.negated || len(a.Use) != c.use {
 			t.Errorf("Parse(%q) = %+v", c.raw, a)
 		}
@@ -36,7 +42,10 @@ func TestParse(t *testing.T) {
 }
 
 func TestParseRejects(t *testing.T) {
-	for _, raw := range []string{"", ">=foo", "?foo", "foo[", "foo[]", "foo[bad flag]", ">=foo-"} {
+	for _, raw := range []string{
+		"", ">=foo", "?foo", "foo[", "foo[]", "foo[bad flag]", ">=foo-",
+		"foo@", "@14", "foo@14@16", "foo@bad/slot", ">=foo@-1.2",
+	} {
 		if _, err := Parse(raw); err == nil {
 			t.Errorf("Parse(%q) succeeded, want error", raw)
 		}
@@ -57,6 +66,9 @@ func TestParseProvided(t *testing.T) {
 	}
 	if _, err := ParseProvided(">=foo-1"); err == nil {
 		t.Fatal("operator in provides accepted")
+	}
+	if _, err := ParseProvided("virtual/foo@14"); err == nil {
+		t.Fatal("slot in provides accepted")
 	}
 }
 
