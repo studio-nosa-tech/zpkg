@@ -289,22 +289,32 @@ func installRecipeTree(cfg config.Config, srcRoot, dest string, allowUnsigned, d
 
 	// Move the old tree aside inside tmp (same filesystem), then install
 	// the staged tree. The deferred RemoveAll cleans up the backup.
-	backup := filepath.Join(tmp, "old")
+	if err := swapTree(staging, dest); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+// swapTree replaces dest with staging using a sibling backup so a failed
+// rename puts the old tree back. The caller keeps the temporary parent alive
+// until this returns and cleans up the backup afterwards.
+func swapTree(staging, dest string) error {
+	backup := filepath.Join(filepath.Dir(staging), "old")
 	if _, err := os.Lstat(dest); err == nil {
 		if err := os.Rename(dest, backup); err != nil {
-			return stats, fmt.Errorf("move old recipe tree aside: %w", err)
+			return fmt.Errorf("move old tree aside: %w", err)
 		}
 	} else if !os.IsNotExist(err) {
-		return stats, err
+		return err
 	}
 	if err := os.Rename(staging, dest); err != nil {
 		// Best effort: put the old tree back so the system stays usable.
 		if _, statErr := os.Lstat(backup); statErr == nil {
 			_ = os.Rename(backup, dest)
 		}
-		return stats, fmt.Errorf("install new recipe tree: %w", err)
+		return fmt.Errorf("install new tree: %w", err)
 	}
-	return stats, nil
+	return nil
 }
 
 // validateRecipeTree scans the staged tree and verifies its recipe manifest.

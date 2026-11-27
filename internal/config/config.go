@@ -9,13 +9,16 @@ import (
 	"strings"
 
 	"github.com/studio-nosa-tech/zpkg/internal/options"
+	"github.com/studio-nosa-tech/zpkg/internal/overlay"
 	"github.com/studio-nosa-tech/zpkg/internal/provenance"
 	"github.com/studio-nosa-tech/zpkg/internal/sandbox"
 )
 
 // Config holds the runtime layout.
 type Config struct {
-	Repos               []string        // recipe repos, in search order (first match wins)
+	Repos               []string        // combined search order: active overlays, then BaseRepos
+	BaseRepos           []string        // official/channel recipe repos
+	Overlays            []overlay.Overlay
 	Root                string          // target system root, absolute
 	Cache               string          // source downloads and build workdirs
 	DB                  string          // installed package database
@@ -113,13 +116,21 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.ReposExplicit {
-		if len(cfg.Repos) > 0 {
-			cfg.TreeRoot = deriveTreeRoot(cfg.Repos[0])
+		cfg.BaseRepos = append([]string{}, cfg.Repos...)
+		if len(cfg.BaseRepos) > 0 {
+			cfg.TreeRoot = deriveTreeRoot(cfg.BaseRepos[0])
 		}
 	} else {
-		cfg.Repos = discoverChannelRepos(cfg.RecipeRoot, cfg.Channel, &cfg.ChannelMissing)
+		cfg.BaseRepos = discoverChannelRepos(cfg.RecipeRoot, cfg.Channel, &cfg.ChannelMissing)
 		cfg.TreeRoot = cfg.RecipeRoot
 	}
+	ovs, err := overlay.Load(absRoot)
+	if err != nil {
+		return Config{}, err
+	}
+	overlay.Activate(ovs, cfg.Channel)
+	cfg.Overlays = ovs
+	cfg.Repos = append(overlay.ActiveRepos(ovs), cfg.BaseRepos...)
 	cfg.Options, err = options.Load(absRoot)
 	if err != nil {
 		return Config{}, err
@@ -251,13 +262,31 @@ func ApplyChannel(cfg *Config, ch string) error {
 	}
 	cfg.Channel = ch
 	cfg.ChannelSource = "flag"
-	if cfg.ReposExplicit {
-		return nil
+	if !cfg.ReposExplicit {
+		cfg.ChannelMissing = false
+		cfg.BaseRepos = discoverChannelRepos(cfg.RecipeRoot, ch, &cfg.ChannelMissing)
+		cfg.TreeRoot = cfg.RecipeRoot
 	}
-	cfg.ChannelMissing = false
-	cfg.Repos = discoverChannelRepos(cfg.RecipeRoot, ch, &cfg.ChannelMissing)
-	cfg.TreeRoot = cfg.RecipeRoot
+	overlay.Activate(cfg.Overlays, ch)
+	cfg.Repos = append(overlay.ActiveRepos(cfg.Overlays), cfg.BaseRepos...)
 	return nil
+}
+
+// OverlayForRepo returns the configured overlay that owns repo, or nil.
+func (c *Config) OverlayForRepo(repo string) *overlay.Overlay {
+	return overlay.ForRepo(c.Overlays, repo)
+}
+
+// OverlayName returns the overlay name that owns repo, or "" for the base
+// tree.
+func (c *Config) OverlayName(repo string) string {
+	return overlay.NameForRepo(c.Overlays, repo)
+}
+
+// RepoLabel renders a recipe repo for output: core/main/desktop for the base
+// tree, overlay/category for an overlay.
+func (c *Config) RepoLabel(repo string) string {
+	return overlay.LabelForRepo(c.Overlays, repo)
 }
 
 // discoverChannelRepos expands a channel tree into category directories.

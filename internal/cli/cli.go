@@ -10,7 +10,7 @@ import (
 )
 
 // Version is the zpkg release version shipped by this source tree.
-const Version = "0.4.0"
+const Version = "0.5.0"
 
 const usage = `zpkg - ZIGNOS package manager (v` + Version + `)
 
@@ -67,6 +67,14 @@ Usage:
                               -n      validate and count only
                               --allow-unsigned  accept a tree with no manifest
                                                 or signature (development)
+  zpkg overlay add <name> [url] [--branch B] [--priority N]
+                  [--allow-unsigned] [--no-sync]
+                              add and sync an additional recipe repository
+                              (the official one is "zignos-menu" / ZIGNOS MENU)
+  zpkg overlay list           configured overlays and their status
+  zpkg overlay sync [name]    update overlays (all when name is omitted)
+  zpkg overlay remove <name> [--keep-tree]
+                              remove an overlay; installed packages stay
   zpkg key generate --private <path> [--public <path>]
                               create an Ed25519 signing key pair
   zpkg key import <pubkey>... add a trusted repository/recipe signing key
@@ -264,6 +272,8 @@ func Run(args []string) error {
 		return cmdMkIndex(rest)
 	case "sync":
 		return cmdSync(rest)
+	case "overlay":
+		return cmdOverlay(rest)
 	case "key":
 		return cmdKey(rest)
 	case "sign":

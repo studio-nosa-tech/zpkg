@@ -57,9 +57,9 @@ func cmdSearch(args []string) error {
 			continue
 		}
 		if nameHit {
-			fmt.Printf("%s %s %s\n", filepath.Base(r.Repo), r.Key(), r.FullVersion())
+			fmt.Printf("%s %s %s\n", cfg.RepoLabel(r.Repo), r.Key(), r.FullVersion())
 		} else {
-			fmt.Printf("%s %s %s (provides %s)\n", filepath.Base(r.Repo), r.Key(), r.FullVersion(), providesHit)
+			fmt.Printf("%s %s %s (provides %s)\n", cfg.RepoLabel(r.Repo), r.Key(), r.FullVersion(), providesHit)
 		}
 	}
 	return nil
@@ -89,7 +89,7 @@ func cmdInfo(names []string) error {
 					if rec.Meta.Slot != "" {
 						line += fmt.Sprintf(" (slot %s", rec.Meta.Slot)
 						if rec.Meta.Repo != "" {
-							line += ", repo " + filepath.Base(rec.Meta.Repo)
+							line += ", repo " + installedRepoLabel(cfg, rec.Meta)
 						}
 						if rec.Meta.Installed != "" {
 							line += ", " + rec.Meta.Installed
@@ -98,6 +98,9 @@ func cmdInfo(names []string) error {
 					}
 				}
 				fmt.Println(line)
+				if rec.Meta != nil && rec.Meta.Overlay != "" {
+					fmt.Printf("  overlay: %s\n", rec.Meta.Overlay)
+				}
 				if rec.Meta != nil && len(rec.Meta.UseFlags) > 0 {
 					fmt.Printf("  useflags: %s\n", joinDeps(rec.Meta.UseFlags))
 				}
@@ -185,7 +188,7 @@ func cmdInfo(names []string) error {
 			continue
 		}
 		for _, c := range cands {
-			fmt.Printf("  available: %s (slot %s, repo %s)\n", c.FullVersion(), c.Slot, filepath.Base(c.Repo))
+			fmt.Printf("  available: %s (slot %s, repo %s)\n", c.FullVersion(), c.Slot, cfg.RepoLabel(c.Repo))
 		}
 		r := cands[0]
 		if len(r.Depends) > 0 {
@@ -199,6 +202,24 @@ func cmdInfo(names []string) error {
 		}
 	}
 	return nil
+}
+
+// installedRepoLabel renders the repo of an installed record. The stored
+// path may no longer be an active overlay (removed since install), so the
+// recorded overlay name is used as a prefix when the repo only resolves to
+// its category directory.
+func installedRepoLabel(cfg config.Config, meta *pkgdb.Meta) string {
+	if meta == nil {
+		return ""
+	}
+	if meta.Repo == "" {
+		return meta.Overlay
+	}
+	label := cfg.RepoLabel(meta.Repo)
+	if meta.Overlay != "" && label != meta.Overlay && !strings.HasPrefix(label, meta.Overlay+"/") {
+		label = meta.Overlay + "/" + label
+	}
+	return label
 }
 
 // cmdOwner reports which package owns a path. Paths are accepted with or

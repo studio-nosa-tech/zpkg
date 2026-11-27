@@ -189,12 +189,62 @@ func Build(cfg config.Config, db pkgdb.DB, targets []string, opts Options) (*Pla
 				continue // up to date
 			}
 			e.Warnings = append(e.Warnings, upgradeWarnings(rec, r)...)
+			if ov := cfg.OverlayName(r.Repo); ov != recMetaOverlay(rec) {
+				e.Warnings = append(e.Warnings, fmt.Sprintf("origin changes: %s -> %s", originLabel(recMetaOverlay(rec)), originLabel(ov)))
+			}
 			fillDependencyDiff(&e, use)
 		}
 		plan.Entries = append(plan.Entries, e)
 	}
 	plan.Orphans = findOrphans(recs, installedClosure(recs, targets), closure, updatedDeps(plan.Entries, cfg))
+	plan.Warnings = append(plan.Warnings, overlayWarnings(cfg, recs)...)
 	return plan, nil
+}
+
+// overlayWarnings reports installed packages whose overlay is not active
+// anymore. They stay installed and are satisfied by installed-only
+// candidates, but no recipe exists to rebuild them.
+func overlayWarnings(cfg config.Config, recs []*pkgdb.Rec) []string {
+	active := map[string]bool{}
+	for _, ov := range cfg.Overlays {
+		if ov.Active {
+			active[ov.Name] = true
+		}
+	}
+	counts := map[string]int{}
+	for _, rec := range recs {
+		if rec.Meta == nil || rec.Meta.Overlay == "" || active[rec.Meta.Overlay] {
+			continue
+		}
+		counts[rec.Meta.Overlay]++
+	}
+	names := make([]string, 0, len(counts))
+	for name := range counts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []string
+	for _, name := range names {
+		out = append(out, fmt.Sprintf("%d installed package(s) come from overlay %q, which is not active; they are kept but cannot be rebuilt until it is added again", counts[name], name))
+	}
+	return out
+}
+
+// recMetaOverlay is the overlay recorded at install time ("" for the
+// official tree, and for records written before overlays existed).
+func recMetaOverlay(rec *pkgdb.Rec) string {
+	if rec == nil || rec.Meta == nil {
+		return ""
+	}
+	return rec.Meta.Overlay
+}
+
+// originLabel renders an overlay name for messages.
+func originLabel(overlay string) string {
+	if overlay == "" {
+		return "the official tree"
+	}
+	return "overlay " + overlay
 }
 
 // installedClosure walks the installed DB from the upgrade targets using the

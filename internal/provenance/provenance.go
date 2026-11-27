@@ -55,6 +55,7 @@ type Package struct {
 type Recipe struct {
 	Repo       string `json:"repo"`
 	Dir        string `json:"dir"`
+	Overlay    string `json:"overlay,omitempty"`
 	Channel    string `json:"channel,omitempty"`
 	Digest     string `json:"digest"`
 	KeyID      string `json:"keyid,omitempty"`

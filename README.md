@@ -66,6 +66,8 @@ Total: 2 packages (1 target, 1 dependency)
 | `use [flag\|-flag]...` / `use --package <pkg> ...` | USE フラグの表示・編集(グローバル / package.use) |
 | `mkindex [--key <private>] [--generation N] [--expires ...] [dir]` | binpkg リポジトリ用 `index.json` を生成。`--key` で署名し `keys/<keyid>.pub` も出力 |
 | `sync [--from <src>] [--dest <dir>] [--git] [--branch <name>] [-n] [--allow-unsigned]` | レシピツリー全体を stage3/レシピ tarball・ディレクトリ・URL・git リポジトリから置換。署名付き `recipes.manifest` を検証 |
+| `overlay add <name> [url] [--branch B] [--priority N] [--allow-unsigned] [--no-sync]` | 追加のレシピリポジトリを登録して同期。`zignos-menu` は URL 組み込み |
+| `overlay list` / `sync [name]` / `remove <name> [--keep-tree]` | オーバーレイの一覧・更新・削除 |
 | `key generate --private <path> [--public <path>]` | Ed25519 署名鍵ペアを生成(秘密鍵 0600) |
 | `key import <pubkey>...` | 公開鍵を trusted.d に登録 |
 | `key list` / `key remove <keyid>` | 信頼済み鍵の一覧 / 削除 |
@@ -132,6 +134,45 @@ git の credential helper か SSH 鍵が必要。
 testing / unstable を使う場合は全チャンネル入りのレシピ tarball を
 `zpkg sync` で取り込む。従来のフラットツリー(`core/` / `main/` 直下)も
 stable として引き続き受理する。
+
+## オーバーレイ (ZIGNOS MENU)
+
+オーバーレイは公式ツリーに重ねる追加のレシピリポジトリ。ZIGNOS では公式の
+**ZIGNOS MENU** (`zignos-menu`) を用意している。公式 URL は組み込み。
+
+```sh
+sudo zpkg overlay add zignos-menu   # 登録して同期
+zpkg overlay list                   # 優先度・状態・パッケージ数
+sudo zpkg install <pkg>             # 公式ツリーと同じ
+sudo zpkg overlay sync              # 最新へ更新
+sudo zpkg overlay remove zignos-menu
+```
+
+登録内容は `/etc/zpkg/overlays.d/<name>.conf`、ツリーは
+`$ZPKG_ROOT/var/lib/zpkg/overlays/<name>` に置く。
+
+```ini
+URL=https://github.com/studio-nosa-tech/zignos-menu.git
+BRANCH=main
+PRIORITY=10
+ALLOW_UNSIGNED=1
+ENABLED=1
+```
+
+- 有効なオーバーレイは公式ツリーより先に検索する。`PRIORITY` が大きいほど
+  優先(既定 10)。同じパッケージキー (`name@slot`) は最初のリポジトリが勝ち、
+  そのリポジトリの全バージョンが候補になる。
+- ツリー側の `overlay.conf` の `CATEGORIES=` はカテゴリディレクトリ
+  (ZIGNOS MENU は `apps games tools`)、`CHANNELS=` は対象チャンネル
+  (空欄 = 全チャンネル)。
+- 署名付きオーバーレイは `recipes.manifest` を trusted key で検証し、
+  generation のロールバックも拒否する。`ZIGNOS MENU` は現在未署名で、
+  `overlay add zignos-menu` が `ALLOW_UNSIGNED=1` を記録する。
+- インストールしたパッケージには `meta.json` と provenance に
+  オーバーレイ名が残る。`zpkg search` / `info` は `zignos-menu/apps` のように表示する。
+- オーバーレイを削除してもインストール済みパッケージは残る。レシピが無い
+  パッケージは installed-only として依存解決に参加し、`upgrade` は警告を
+  出して再ビルドしない。再ビルドするにはオーバーレイを戻す。
 
 ## リリースチャンネル
 
@@ -593,6 +634,9 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
 - トランザクション: `.txn/journal.json`(ヘッダ)+ `.txn/journal.log`
   (追記専用イベント、fsync 付き)。失敗時はその場でロールバック、
   クラッシュ時は次回操作または `zpkg recover` で修復
+- オーバーレイ: `zpkg overlay add/list/sync/remove`。git / tarball / ディレクトリ
+  から取得し、公式ツリーより先に検索する。`overlay.conf` のカテゴリと
+  チャンネル、優先度、署名検証とロールバック対策、来歴への記録に対応
 - 出力: 事前プラン(USE + Total)と `>>> Building` / `>>> Installing (i of n)` /
   `>>> Installed` のフェーズ行。端末のときだけ緑(`NO_COLOR` / `TERM=dumb` で無効)
 
@@ -608,6 +652,10 @@ binpkg のバイト一致は保証せず、hash が異なる場合は注記す�
   直下はすべて variant ディレクトリで、それぞれ `version` を持つ必要がある
 - `@` はパッケージ名で予約された。従来 `@` を含むディレクトリ名は slot として
   解釈される
+- 公式 ZIGNOS MENU は未署名。公式名の `overlay add zignos-menu` は
+  `ALLOW_UNSIGNED=1` を記録して受け入れる(署名が付き次第そちらを検証する)
+- オーバーレイを削除したパッケージは installed-only として残るが、レシピが
+  戻るまで再ビルドできない
 - 公開 binpkg リポジトリの運用・鍵配布は未整備(署名の仕組みと `keys/` 出力は実装済み)
 - 鍵失効リスト(CRL)は未対応。`key remove` によるローテーションで運用する
 - GPG/OpenPGP は未対応。署名 envelope の `algorithm` を拡張して将来追加する

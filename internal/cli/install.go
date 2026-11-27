@@ -56,10 +56,13 @@ func metaFromRecipe(r *recipe.Recipe, use, videoCards []string, channel string) 
 	}
 }
 
-// recipeTreeOrigin finds the recipe tree root (parent of the category dir)
-// and returns its signed manifest provenance, when present.
+// recipeTreeOrigin finds the recipe tree root (official channel tree or the
+// overlay that owns the recipe) and returns its signed manifest provenance.
 func recipeTreeOrigin(r *recipe.Recipe, cfg config.Config) (root, keyID string, generation int64) {
 	root = cfg.TreeRoot
+	if ov := cfg.OverlayForRepo(r.Repo); ov != nil {
+		root = ov.Dir
+	}
 	if root == "" {
 		root = filepath.Dir(filepath.Dir(r.Dir))
 	}
@@ -307,6 +310,7 @@ func installResolved(cfg config.Config, res *resolve.Result, handleKeys, targetK
 			}
 		}
 		meta := metaFromRecipe(r, opts.Use, videoCardsFor(r, opts), cfg.Channel)
+		meta.Overlay = cfg.OverlayName(r.Repo)
 		meta.Origin = res.OriginKind
 		meta.OriginRepo = res.OriginRepo
 		meta.OriginKeyID = res.OriginKeyID

@@ -31,6 +31,7 @@ type Meta struct {
 	Revision  int      `json:"revision"`
 	Slot      string   `json:"slot,omitempty"`
 	Repo      string   `json:"repo,omitempty"`
+	Overlay   string   `json:"overlay,omitempty"` // overlay name, "" for the official tree
 	Channel   string   `json:"channel,omitempty"` // release channel used at install time
 	Arch      string   `json:"arch,omitempty"`
 	Installed string   `json:"installed,omitempty"` // RFC3339, UTC
@@ -114,6 +115,12 @@ func (db DB) List() ([]Ref, error) {
 	var refs []Ref
 	for _, it := range items {
 		if !it.IsDir() {
+			continue
+		}
+		// The DB directory also holds non-package data (for example the
+		// synced overlay trees in "overlays"). A record always has a version
+		// file, so anything else is not a package.
+		if _, err := os.Stat(filepath.Join(db.Dir, it.Name(), "version")); err != nil {
 			continue
 		}
 		name, slot := SplitKey(it.Name())

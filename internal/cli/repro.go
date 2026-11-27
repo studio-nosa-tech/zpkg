@@ -86,7 +86,8 @@ func provenanceForBuild(db pkgdb.DB, cfg config.Config, r *recipe.Recipe, res *b
 			Slot: r.Slot, Arch: runtime.GOARCH,
 		},
 		Recipe: provenance.Recipe{
-			Repo: r.Repo, Dir: r.Dir, Channel: cfg.Channel, Digest: res.RecipeDigest,
+			Repo: r.Repo, Dir: r.Dir, Overlay: cfg.OverlayName(r.Repo),
+			Channel: cfg.Channel, Digest: res.RecipeDigest,
 			KeyID: meta.OriginKeyID, Generation: meta.OriginGeneration,
 		},
 		Sources: res.Sources,

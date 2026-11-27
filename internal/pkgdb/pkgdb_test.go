@@ -8,6 +8,29 @@ import (
 	"github.com/studio-nosa-tech/zpkg/internal/manifest"
 )
 
+func TestListIgnoresNonPackageDirs(t *testing.T) {
+	// Overlay trees live next to the records under var/lib/zpkg/overlays;
+	// List must only report directories that are actual package records.
+	db := DB{Dir: t.TempDir()}
+	if err := os.MkdirAll(filepath.Join(db.Dir, "overlays", "menu", "apps"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tool := filepath.Join(db.Dir, "tool@1")
+	if err := os.MkdirAll(tool, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tool, "version"), []byte("1.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	refs, err := db.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 || refs[0].String() != "tool@1" {
+		t.Fatalf("refs = %v", refs)
+	}
+}
+
 func TestSaveGetRoundtrip(t *testing.T) {
 	db := DB{Dir: t.TempDir()}
 	rec := &Rec{
