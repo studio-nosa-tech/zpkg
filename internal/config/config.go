@@ -16,8 +16,8 @@ import (
 
 // Config holds the runtime layout.
 type Config struct {
-	Repos               []string        // combined search order: active overlays, then BaseRepos
-	BaseRepos           []string        // official/channel recipe repos
+	Repos               []string // combined search order: active overlays, then BaseRepos
+	BaseRepos           []string // official/channel recipe repos
 	Overlays            []overlay.Overlay
 	Root                string          // target system root, absolute
 	Cache               string          // source downloads and build workdirs
